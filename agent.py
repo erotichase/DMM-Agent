@@ -102,14 +102,41 @@ _last_sync_version: int = 0  # 增量同步版本号
 _last_synced_codes: set[str] = set()  # 上次同步的番号集合
 
 def _detect_ffprobe() -> str:
-    """检测 ffprobe 路径（优先配置路径，其次系统 PATH），返回可执行路径或空串"""
+    """检测 ffprobe 路径（优先配置路径，其次系统 PATH），返回可执行路径或空串。
+
+    检测成功后执行 `ffprobe -version` 验证可执行性。
+    """
+    import subprocess
+
+    path = ""
     if FFPROBE_PATH:
         if os.path.isfile(FFPROBE_PATH):
-            return FFPROBE_PATH
-        logger.warning("FFPROBE_PATH 指定的文件不存在: %s", FFPROBE_PATH)
+            path = FFPROBE_PATH
+        else:
+            logger.warning("FFPROBE_PATH 指定的文件不存在: %s", FFPROBE_PATH)
+            return ""
+    else:
+        path = shutil.which("ffprobe") or ""
+
+    if not path:
         return ""
-    found = shutil.which("ffprobe")
-    return found or ""
+
+    # 验证可执行性
+    try:
+        result = subprocess.run(
+            [path, "-version"],
+            capture_output=True, timeout=10,
+        )
+        if result.returncode != 0:
+            logger.warning("ffprobe 存在但无法执行: %s (returncode=%d)", path, result.returncode)
+            return ""
+        version_line = result.stdout.decode("utf-8", errors="replace").split("\n")[0]
+        logger.info("ffprobe 版本: %s", version_line.strip())
+    except Exception as exc:
+        logger.warning("ffprobe 存在但执行失败: %s (%s)", path, exc)
+        return ""
+
+    return path
 
 _FFPROBE_CMD = _detect_ffprobe()
 _HAS_FFPROBE = bool(_FFPROBE_CMD)
@@ -232,11 +259,11 @@ def update_sentinel_device_id(device_id: int):
 # 视频元数据探测
 # ═══════════════════════════════════════════════════════════════
 
-_ffprobe_error_logged = False  # 仅首次失败打日志，避免刷屏
+_ffprobe_fail_count = 0  # 累计失败次数（前 5 次打日志，之后每 50 次打一次）
 
 def probe_video_metadata(filepath: Path) -> dict | None:
     """探测视频元数据（分辨率/编码/码率/音频），失败返回 None"""
-    global _ffprobe_error_logged
+    global _ffprobe_fail_count
     if not _HAS_FFPROBE:
         return None
     import subprocess
@@ -244,14 +271,16 @@ def probe_video_metadata(filepath: Path) -> dict | None:
         result = subprocess.run(
             [_FFPROBE_CMD, "-v", "quiet", "-print_format", "json",
              "-show_streams", str(filepath)],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, timeout=15,
         )
         if result.returncode != 0:
-            if not _ffprobe_error_logged:
-                logger.warning("ffprobe 返回非零: code=%d, stderr=%s", result.returncode, result.stderr[:200])
-                _ffprobe_error_logged = True
+            _ffprobe_fail_count += 1
+            if _ffprobe_fail_count <= 5 or _ffprobe_fail_count % 50 == 0:
+                stderr = result.stderr.decode("utf-8", errors="replace")[:200]
+                logger.warning("ffprobe 返回非零: code=%d, stderr=%s (fail #%d)",
+                               result.returncode, stderr, _ffprobe_fail_count)
             return None
-        data = json.loads(result.stdout)
+        data = json.loads(result.stdout.decode("utf-8", errors="replace"))
         video_stream = None
         audio_codec = None
         for s in data.get("streams", []):
@@ -271,9 +300,9 @@ def probe_video_metadata(filepath: Path) -> dict | None:
             "audio": audio_codec or "",
         }
     except Exception as exc:
-        if not _ffprobe_error_logged:
-            logger.warning("ffprobe 执行异常: %s (cmd=%s)", exc, _FFPROBE_CMD)
-            _ffprobe_error_logged = True
+        _ffprobe_fail_count += 1
+        if _ffprobe_fail_count <= 5 or _ffprobe_fail_count % 50 == 0:
+            logger.warning("ffprobe 执行异常: %s (file=%s, fail #%d)", exc, filepath, _ffprobe_fail_count)
         return None
 
 
@@ -350,8 +379,8 @@ def scan_local_files() -> list[dict]:
         total_size = sum(f[2] for f in file_list)
         paths = [f[1] for f in file_list]
 
-        # 用第一个文件的元数据确定分辨率
-        first_meta = file_list[0][3]
+        # 用任一文件的元数据确定分辨率（probe 的不一定排在第一个）
+        first_meta = next((f[3] for f in file_list if f[3] is not None), None)
         res = None
         meta_out = None
         if first_meta:
