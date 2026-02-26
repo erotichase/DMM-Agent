@@ -1,0 +1,8 @@
+{
+  "CLOUD_WS_URL": "wss://dmmcm.duckdns.org/ws/agent",
+  "DEVICE_TOKEN": "",
+  "BASE_DIRS": ["F:/JAVTMP"],
+  "TARGET_DIRS": ["F:/JAV"],
+  "FFPROBE_PATH": "F:/JAVTool/ffprobe.exe",
+  "DEV": false
+}

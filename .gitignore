@@ -1,0 +1,9 @@
+config.json
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+*.log
+.DS_Store
+/tmp/
+dmm-agent.lock
