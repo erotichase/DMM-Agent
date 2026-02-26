@@ -3,6 +3,5 @@
   "DEVICE_TOKEN": "",
   "BASE_DIRS": ["F:/JAVTMP"],
   "TARGET_DIRS": ["F:/JAV"],
-  "FFPROBE_PATH": "F:/JAVTool/ffprobe.exe",
-  "DEV": false
+  "FFPROBE_PATH": "F:/JAVTool/ffprobe.exe"
 }

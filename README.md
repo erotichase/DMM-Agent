@@ -20,8 +20,7 @@ cp config.example.json config.json
   "DEVICE_TOKEN": "",
   "BASE_DIRS": ["/path/to/your/videos"],
   "TARGET_DIRS": ["/path/to/organized"],
-  "FFPROBE_PATH": "",
-  "DEV": false
+  "FFPROBE_PATH": ""
 }
 ```
 
@@ -44,10 +43,7 @@ python3 agent.py
 
 ### 3. 首次绑定
 
-首次启动时 `DEVICE_TOKEN` 为空，Agent 会自动进入绑定流程：
-
-- **开发环境** (`"DEV": true`)：自动调用 dev-bind API，无需手动操作
-- **生产环境** (`"DEV": false`)：打印 Telegram Bot 链接，点击链接完成绑定
+首次启动时 `DEVICE_TOKEN` 为空，Agent 会打印 Telegram Bot 链接，点击链接完成绑定：
 
 ```
 ========================================================
@@ -74,7 +70,6 @@ python3 agent.py
 | `BASE_DIRS`    | 是   | 视频扫描目录列表，绝对路径                             |
 | `TARGET_DIRS`  | 是   | 整理目标目录列表，优先使用第一个                       |
 | `FFPROBE_PATH` | 否   | ffprobe 路径（Windows 必填，Linux/macOS 留空自动检测） |
-| `DEV`          | 否   | 开发模式（默认 false）                                 |
 
 **配置示例：**
 
@@ -89,10 +84,8 @@ python3 agent.py
 
 // macOS
 {
-    "CLOUD_WS_URL": "ws://127.0.0.1:8000/ws/agent",
     "BASE_DIRS": ["/Users/chase/Downloads/115"],
-    "TARGET_DIRS": ["/Users/chase/Downloads/Collection"],
-    "DEV": true
+    "TARGET_DIRS": ["/Users/chase/Downloads/Collection"]
 }
 
 // Linux NAS
@@ -145,13 +138,12 @@ F:/JAV/桜空もも/JUR-582/JUR-582.mp4
 
 ## 支持的任务类型
 
-| 任务      | 说明                                          |
-| --------- | --------------------------------------------- |
-| SCAN      | 扫描 BASE_DIRS 下的视频文件，提取番号上报云端 |
-| MOVE      | 按元数据将视频移动到标准目录结构              |
-| OPEN_FILE | 打开指定视频文件（远程播放）                  |
-
-所有任务均支持 `dry_run` 预览模式。
+| 任务      | 说明                                                 |
+| --------- | ---------------------------------------------------- |
+| SCAN      | 扫描 BASE_DIRS 下的视频文件，提取番号上报云端        |
+| MOVE      | 按元数据将视频移动到标准目录结构                     |
+| ORGANIZE  | 按 `ORGANIZE_PATTERN` 模板自动整理文件到 TARGET_DIRS |
+| OPEN_FILE | 打开指定视频文件（远程播放，不经过任务队列直接处理） |
 
 ## 常见问题
 
@@ -161,7 +153,7 @@ F:/JAV/桜空もも/JUR-582/JUR-582.mp4
 [ERROR] 连接断开: [Errno 61] Connection refused
 ```
 
-检查 `CLOUD_WS_URL` 是否正确。开发环境确保后端已启动。
+检查 `CLOUD_WS_URL` 是否正确。
 
 ### 认证失败
 
@@ -204,31 +196,8 @@ sudo systemctl enable dmm-agent && sudo systemctl start dmm-agent
 # Windows — 使用 run.ps1 或创建计划任务
 ```
 
-## 开发者信息
-
-### 单文件约束
-
-`agent.py` 必须保持单文件（stdlib + websockets，无其他外部依赖）。
-
-### 配置加载机制
-
-```
-config.json 存在？
-  ├─ 是 → 合并到默认配置
-  └─ 否 → 使用内置默认值
-
-config.json 中 "DEV": true？
-  ├─ 是 → 开发模式（自动绑定、WS 代理）
-  └─ 否 → 生产模式（Telegram 绑定）
-```
-
-### 配置持久化
-
-绑定成功后 token 自动写入 `config.json`，不修改 agent.py 源码。
-
 ## 安全提示
 
 1. **不要分享 DEVICE_TOKEN** — 它相当于设备密码
 2. **定期备份 config.json** — 避免重新绑定
-3. **谨慎使用 MOVE** — 先用 `dry_run` 预览
-4. **避免 root 运行** — Agent 会警告 root 权限风险
+3. **避免 root 运行** — Agent 会警告 root 权限风险

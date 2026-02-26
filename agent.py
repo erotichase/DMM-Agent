@@ -186,7 +186,6 @@ def normalize_code(raw: str) -> str:
     match = re.match(r"^([A-Z_]+?)(\d+.*)$", raw)
     if match:
         prefix = match.group(1).rstrip("_")
-        prefix = re.sub(r"^[\d_]+", "", prefix)
         if prefix:
             return f"{prefix}-{match.group(2)}"
 
@@ -329,11 +328,28 @@ def sanitize_dirname(name: str) -> str:
 # 本地文件扫描
 # ═══════════════════════════════════════════════════════════════
 
-def scan_local_files() -> list[dict]:
-    """扫描所有配置目录的视频文件，返回 [{code, paths, size, res?, meta?}]"""
+def scan_local_files(include_target: bool = True) -> list[dict]:
+    """扫描视频文件，返回 [{code, paths, size, res?, meta?}]
+
+    Args:
+        include_target: True=扫描 BASE_DIRS + TARGET_DIRS（sync 用），
+                        False=仅扫描 BASE_DIRS（scan/organize 用）
+    """
     code_files: dict[str, list[tuple[int, str, int, dict | None]]] = {}
 
-    for dir_idx, base_dir in enumerate(BASE_DIRS):
+    # 构建扫描目录列表（去重，防止子目录重叠导致重复扫描）
+    dirs_to_scan = list(BASE_DIRS)
+    if include_target:
+        dirs_to_scan = dirs_to_scan + list(TARGET_DIRS)
+    all_dirs: list[str] = []
+    seen: set[str] = set()
+    for d in dirs_to_scan:
+        normalized = os.path.normcase(os.path.abspath(d))
+        if normalized not in seen:
+            seen.add(normalized)
+            all_dirs.append(d)
+
+    for base_dir in all_dirs:
         root = Path(base_dir)
         if not root.is_dir():
             logger.warning("扫描目录不存在: %s", base_dir)
@@ -355,8 +371,8 @@ def scan_local_files() -> list[dict]:
                 continue
 
             cd_num = extract_cd_number(path.stem)
-            # 计算相对路径并 NFC 归一化
-            rel_path = str(path.relative_to(root))
+            # 计算相对路径并 NFC 归一化，统一使用 / 分隔符（跨平台一致）
+            rel_path = path.relative_to(root).as_posix()
             rel_path = unicodedata.normalize("NFC", rel_path)
 
             try:
@@ -503,22 +519,14 @@ def build_auth_payload() -> dict:
 
 
 def _handle_token_rotate(payload: dict) -> dict:
-    """处理令牌轮换消息，更新配置文件中的 DEVICE_TOKEN"""
+    """处理令牌轮换消息，更新 config.json 中的 DEVICE_TOKEN"""
     global DEVICE_TOKEN
     new_token = payload.get("new_token", "")
     if not new_token or len(new_token) < 16:
         return {"status": "write_failed", "error": "Invalid new_token format"}
 
     try:
-        agent_path = Path(__file__).resolve()
-        content = agent_path.read_text(encoding="utf-8")
-        # 替换配置区的 DEVICE_TOKEN
-        old_line = f'DEVICE_TOKEN = "{DEVICE_TOKEN}"'
-        new_line = f'DEVICE_TOKEN = "{new_token}"'
-        if old_line not in content:
-            return {"status": "write_failed", "error": "Cannot locate DEVICE_TOKEN in agent.py"}
-        content = content.replace(old_line, new_line, 1)
-        agent_path.write_text(content, encoding="utf-8")
+        _persist_token(new_token)
         DEVICE_TOKEN = new_token
         logger.info("令牌已轮换")
         return {"status": "accepted"}
@@ -604,17 +612,13 @@ _ON_CONFLICT_WHITELIST = {"skip", "rename", "overwrite"}
 
 
 def _validate_task_payload(payload: dict) -> str | None:
-    """校验任务参数（task_id/action/dry_run/on_conflict），返回错误或 None"""
+    """校验任务参数（task_id/action/on_conflict），返回错误或 None"""
     task_id = payload.get("task_id")
     if not isinstance(task_id, int) or task_id <= 0:
         return "Invalid task_id"
     action = payload.get("action", "")
     if action not in {"MOVE", "SCAN", "ORGANIZE"}:
         return f"Unknown action: {action}"
-    # dry_run 类型校验
-    dry_run = payload.get("dry_run")
-    if dry_run is not None and not isinstance(dry_run, bool):
-        return "dry_run must be a boolean"
     # 所有路径字段禁止空字节
     params = payload.get("params", {})
     for key, val in params.items():
@@ -632,7 +636,6 @@ def execute_task(payload: dict, progress_q: queue.Queue | None = None) -> dict:
     """执行任务（MOVE/SCAN），返回 {task_id, status, result/error}"""
     task_id = payload.get("task_id")
     action = payload.get("action", "")
-    dry_run = payload.get("dry_run", False)
     params = payload.get("params", {})
 
     def _report_progress(progress: int, msg: str = ""):
@@ -646,7 +649,7 @@ def execute_task(payload: dict, progress_q: queue.Queue | None = None) -> dict:
 
     try:
         if action == "MOVE":
-            return _execute_move(task_id, params, dry_run, _report_progress)
+            return _execute_move(task_id, params, _report_progress)
         elif action == "SCAN":
             return _execute_scan(task_id, params)
         elif action == "ORGANIZE":
@@ -776,8 +779,8 @@ def _cleanup_empty_dirs(moves: list[dict]) -> int:
     return cleaned
 
 
-def _execute_move(task_id: int, params: dict, dry_run: bool, report_progress=None, target_base: str = None) -> dict:
-    """执行移动任务（支持跨盘、冲突处理、预览模式）"""
+def _execute_move(task_id: int, params: dict, report_progress=None, target_base: str = None) -> dict:
+    """执行移动任务（支持跨盘、冲突处理）"""
     code = params.get("code", "")
     target_dir = params.get("target_dir", "")
     on_conflict = params.get("on_conflict", "skip")
@@ -812,22 +815,13 @@ def _execute_move(task_id: int, params: dict, dry_run: bool, report_progress=Non
             dest_name = src_path.name
         dest_path = dest_dir / dest_name
 
-        rel_from = str(src_path.relative_to(base_root))
+        rel_from = src_path.relative_to(base_root).as_posix()
         # 如果跨盘，dest 相对于 actual_base；否则相对于 base_root
         try:
-            rel_to = str(dest_path.relative_to(base_root))
+            rel_to = dest_path.relative_to(base_root).as_posix()
         except ValueError:
-            rel_to = str(dest_path.relative_to(actual_base))
+            rel_to = dest_path.relative_to(actual_base).as_posix()
         moves.append({"from": rel_from, "to": rel_to, "src": src_path, "dest": dest_path})
-
-    if dry_run:
-        return {
-            "task_id": task_id,
-            "status": "PREVIEW",
-            "result": {
-                "moves": [{"from": m["from"], "to": m["to"]} for m in moves],
-            },
-        }
 
     # 执行移动
     moved = 0
@@ -891,7 +885,7 @@ def _execute_scan(task_id: int, params: dict) -> dict:
     """执行扫描任务，返回文件清单 + 去重番号列表"""
     if not BASE_DIRS:
         return {"task_id": task_id, "status": "FAILED", "error": "未配置扫描目录 (BASE_DIRS)"}
-    files = scan_local_files()
+    files = scan_local_files(include_target=False)
     codes = list(dict.fromkeys(f["code"] for f in files))
     return {
         "task_id": task_id,
@@ -917,7 +911,7 @@ def _execute_organize(task_id: int, params: dict) -> dict:
         return {"task_id": task_id, "status": "FAILED", "error": "TARGET_DIRS not configured"}
 
     target_base = TARGET_DIRS[0]
-    files = scan_local_files()
+    files = scan_local_files(include_target=False)
     # 按 code 索引文件
     code_to_file = {}
     for f in files:
@@ -954,7 +948,6 @@ def _execute_organize(task_id: int, params: dict) -> dict:
         result = _execute_move(
             task_id=-1,
             params={"code": code, "target_dir": target_dir, "on_conflict": ORGANIZE_ON_CONFLICT},
-            dry_run=False,
             target_base=target_base,
         )
 
@@ -1097,20 +1090,19 @@ async def ws_session():
                     return msg
                 _buffered_messages.append(raw)
 
+        async def _send_sync_report(report, await_ack=False):
+            shards = report if isinstance(report, list) else [report]
+            if len(shards) > 1:
+                logger.info("同步报告: %d 分片", len(shards))
+            for shard in shards:
+                await ws.send(json.dumps({"type": "SYNC_REPORT", "payload": shard}))
+                if await_ack:
+                    await _recv_until_sync_ack()
+
         if BASE_DIRS:
             files = scan_local_files()
             logger.info("扫描完成: %d 个番号", len(files))
-
-            report = build_sync_report()
-            if isinstance(report, list):
-                # 多分片
-                logger.info("同步报告: %d 分片", len(report))
-                for shard in report:
-                    await ws.send(json.dumps({"type": "SYNC_REPORT", "payload": shard}))
-                    await _recv_until_sync_ack()
-            else:
-                await ws.send(json.dumps({"type": "SYNC_REPORT", "payload": report}))
-                await _recv_until_sync_ack()
+            await _send_sync_report(build_sync_report(), await_ack=True)
 
         # Phase 3: 心跳 + 任务队列 + 消息循环
         task_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
@@ -1129,6 +1121,15 @@ async def ws_session():
 
         async def task_worker():
             """单 worker 顺序执行任务（保证文件操作串行化）"""
+
+            async def _flush_progress(pq):
+                while not pq.empty():
+                    try:
+                        prog = pq.get_nowait()
+                        await ws.send(json.dumps({"type": "TASK_PROGRESS", "payload": prog}))
+                    except (queue.Empty, Exception):
+                        break
+
             while not _shutdown_event.is_set():
                 try:
                     payload = await asyncio.wait_for(task_queue.get(), timeout=5)
@@ -1140,18 +1141,11 @@ async def ws_session():
                 progress_q = queue.Queue()
                 loop = asyncio.get_event_loop()
                 future = loop.run_in_executor(None, execute_task, payload, progress_q)
-                # 轮询进度队列，边执行边发送 TASK_PROGRESS
                 deadline = loop.time() + TASK_TIMEOUT
                 result = None
                 try:
                     while True:
-                        # 排空进度队列
-                        while not progress_q.empty():
-                            try:
-                                prog = progress_q.get_nowait()
-                                await ws.send(json.dumps({"type": "TASK_PROGRESS", "payload": prog}))
-                            except queue.Empty:
-                                break
+                        await _flush_progress(progress_q)
                         remaining = deadline - loop.time()
                         if remaining <= 0:
                             future.cancel()
@@ -1164,13 +1158,7 @@ async def ws_session():
                             continue
                 except Exception as e:
                     result = {"task_id": task_id, "status": "FAILED", "error": sanitize_error(str(e))}
-                # 排空剩余进度消息
-                while not progress_q.empty():
-                    try:
-                        prog = progress_q.get_nowait()
-                        await ws.send(json.dumps({"type": "TASK_PROGRESS", "payload": prog}))
-                    except (queue.Empty, Exception):
-                        break
+                await _flush_progress(progress_q)
 
                 status = result.get("status") if result else "None"
                 if status == "SUCCESS":
@@ -1182,12 +1170,7 @@ async def ws_session():
                 if action == "ORGANIZE" and status == "SUCCESS":
                     organized = result.get("result", {}).get("organized", 0)
                     if organized > 0:
-                        report = build_sync_report(incremental=False)
-                        if isinstance(report, list):
-                            for shard in report:
-                                await ws.send(json.dumps({"type": "SYNC_REPORT", "payload": shard}))
-                        else:
-                            await ws.send(json.dumps({"type": "SYNC_REPORT", "payload": report}))
+                        await _send_sync_report(build_sync_report(incremental=False))
 
                 try:
                     await ws.send(json.dumps({"type": "TASK_RESULT", "payload": result}))
@@ -1268,12 +1251,7 @@ async def ws_session():
                     logger.warning("同步被拒绝: %s，重传全量", reason)
                     _last_sync_version = 0
                     _last_synced_codes = set()
-                    report = build_sync_report(incremental=False)
-                    if isinstance(report, list):
-                        for shard in report:
-                            await ws.send(json.dumps({"type": "SYNC_REPORT", "payload": shard}))
-                    else:
-                        await ws.send(json.dumps({"type": "SYNC_REPORT", "payload": report}))
+                    await _send_sync_report(build_sync_report(incremental=False))
 
                 elif msg_type == "TOKEN_ROTATE":
                     ack = _handle_token_rotate(payload)
@@ -1554,7 +1532,7 @@ def main():
                 logger.warning("扫描路径非目录: %s", bd)
 
     # root 权限警告
-    if os.getuid() == 0 if hasattr(os, "getuid") else False:
+    if hasattr(os, "getuid") and os.getuid() == 0:
         logger.warning("⚠️  以 root 运行有安全风险，建议使用普通用户")
 
     # 单实例锁
