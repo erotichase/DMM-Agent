@@ -3,13 +3,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 AGENT="$SCRIPT_DIR/agent.py"
-VENV="$(dirname "$SCRIPT_DIR")/.venv"
+VENV="$SCRIPT_DIR/.venv"
 
-# Check root venv exists
+# Auto-create venv if missing
 if [ ! -d "$VENV" ]; then
-    echo "[error] Root .venv not found. Run from project root:"
-    echo "  pip install -e \"cloud/[dev]\" websockets"
-    exit 1
+    echo "[setup] Creating venv..."
+    python3 -m venv "$VENV"
+    "$VENV/bin/pip" install -q -r "$SCRIPT_DIR/requirements.txt"
+    echo "[setup] Done"
 fi
 
 # Check if DEVICE_TOKEN is configured
