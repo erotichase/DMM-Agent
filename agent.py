@@ -1051,6 +1051,23 @@ async def ws_session():
             update_sentinel_device_id(device_id)
 
         # Phase 2: 初始扫描 + 同步
+        # 等待 SYNC_ACK/SYNC_REJECT 期间可能收到其他消息（如 EXEC_TASK），
+        # 需要缓存起来在 Phase 3 处理，否则会被丢弃。
+        _buffered_messages: list[str] = []
+
+        async def _recv_until_sync_ack():
+            """读取消息直到收到 SYNC_ACK/SYNC_REJECT，其他消息缓存"""
+            while True:
+                raw = await asyncio.wait_for(ws.recv(), timeout=30)
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                msg_type = msg.get("type", "")
+                if msg_type in ("SYNC_ACK", "SYNC_REJECT", "SYNC_SHARD_ACK"):
+                    return msg
+                _buffered_messages.append(raw)
+
         if BASE_DIRS:
             files = scan_local_files()
             logger.info("扫描完成: %d 个番号", len(files))
@@ -1061,10 +1078,10 @@ async def ws_session():
                 logger.info("同步报告: %d 分片", len(report))
                 for shard in report:
                     await ws.send(json.dumps({"type": "SYNC_REPORT", "payload": shard}))
-                    await asyncio.wait_for(ws.recv(), timeout=30)
+                    await _recv_until_sync_ack()
             else:
                 await ws.send(json.dumps({"type": "SYNC_REPORT", "payload": report}))
-                await asyncio.wait_for(ws.recv(), timeout=30)
+                await _recv_until_sync_ack()
 
         # Phase 3: 心跳 + 任务队列 + 消息循环
         task_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
@@ -1151,6 +1168,21 @@ async def ws_session():
 
         async def message_loop():
             global _last_sync_version, _last_synced_codes
+            # 先处理 Phase 2 期间缓存的消息（如 EXEC_TASK）
+            for buffered_raw in _buffered_messages:
+                try:
+                    msg = json.loads(buffered_raw)
+                except json.JSONDecodeError:
+                    continue
+                msg_type = msg.get("type", "")
+                payload = msg.get("payload", {})
+                if msg_type == "EXEC_TASK":
+                    try:
+                        task_queue.put_nowait(payload)
+                    except asyncio.QueueFull:
+                        pass
+            _buffered_messages.clear()
+
             while True:
                 try:
                     raw = await ws.recv()
