@@ -16,8 +16,6 @@ cp config.example.json config.json
 
 ```json
 {
-  "CLOUD_WS_URL": "wss://dmmcm.duckdns.org/ws/agent",
-  "DEVICE_TOKEN": "",
   "BASE_DIRS": ["/path/to/your/videos"],
   "TARGET_DIRS": ["/path/to/organized"],
   "FFPROBE_PATH": ""
@@ -63,20 +61,19 @@ python3 agent.py
 
 所有配置通过 `config.json` 管理（已加入 .gitignore，代码更新不会覆盖）。
 
-| 字段           | 必填 | 说明                                                   |
-| -------------- | ---- | ------------------------------------------------------ |
-| `CLOUD_WS_URL` | 是   | 云端 WebSocket 地址                                    |
-| `DEVICE_TOKEN` | 否   | 设备令牌（首次启动自动获取）                           |
-| `BASE_DIRS`    | 是   | 视频扫描目录列表，绝对路径                             |
-| `TARGET_DIRS`  | 是   | 整理目标目录列表，优先使用第一个                       |
-| `FFPROBE_PATH` | 否   | ffprobe 路径（Windows 必填，Linux/macOS 留空自动检测） |
+| 字段           | 必填 | 说明                                                              |
+| -------------- | ---- | ----------------------------------------------------------------- |
+| `BASE_DIRS`    | 是   | 视频扫描目录列表，绝对路径                                        |
+| `TARGET_DIRS`  | 是   | 整理目标目录列表，优先使用第一个                                  |
+| `DEVICE_TOKEN` | 否   | 设备令牌（首次启动自动获取）                                      |
+| `FFPROBE_PATH` | 否   | ffprobe 路径（Windows 必填，Linux/macOS 留空自动检测）            |
+| `CLOUD_WS_URL` | 否   | 云端 WebSocket 地址（默认根据环境自动选择，一般无需手动指定）     |
 
 **配置示例：**
 
 ```json
 // Windows
 {
-    "CLOUD_WS_URL": "wss://dmmcm.duckdns.org/ws/agent",
     "BASE_DIRS": ["F:/JAVTMP"],
     "TARGET_DIRS": ["F:/JAV"],
     "FFPROBE_PATH": "F:/JAVTool/ffprobe.exe"
@@ -90,7 +87,6 @@ python3 agent.py
 
 // Linux NAS
 {
-    "CLOUD_WS_URL": "wss://dmmcm.duckdns.org/ws/agent",
     "BASE_DIRS": ["/mnt/disk1", "/mnt/disk2"],
     "TARGET_DIRS": ["/mnt/storage"]
 }

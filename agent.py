@@ -19,8 +19,10 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _CONFIG_FILE = os.path.join(_SCRIPT_DIR, "config.json")
 
 # 默认配置（config.json 中的同名字段会覆盖）
+_PROD_WS_URL = "wss://dmmcm.duckdns.org/ws/agent"
+_DEV_WS_URL = "ws://127.0.0.1:8000/ws/agent"
+
 _DEFAULT_CONFIG = {
-    "CLOUD_WS_URL": "wss://dmmcm.duckdns.org/ws/agent",
     "DEVICE_TOKEN": "",
     "BASE_DIRS": [],
     "TARGET_DIRS": [],
@@ -35,12 +37,12 @@ if os.path.exists(_CONFIG_FILE):
 else:
     _config = dict(_DEFAULT_CONFIG)
 
-CLOUD_WS_URL = _config["CLOUD_WS_URL"]
+IS_DEV = _config.get("DEV", False)
+CLOUD_WS_URL = _config.get("CLOUD_WS_URL", _DEV_WS_URL if IS_DEV else _PROD_WS_URL)
 DEVICE_TOKEN = _config.get("DEVICE_TOKEN", "")
 BASE_DIRS = _config.get("BASE_DIRS", [])
 TARGET_DIRS = _config.get("TARGET_DIRS", [])
 FFPROBE_PATH = _config.get("FFPROBE_PATH", "")
-IS_DEV = _config.get("DEV", False)
 
 # 通用配置
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".wmv"}  # 支持的视频文件扩展名
@@ -987,8 +989,8 @@ async def ws_session():
     logger.info("正在连接 %s ...", CLOUD_WS_URL)
 
     connect_kwargs: dict = {}
-    if IS_DEV and hasattr(websockets, "__version__") and int(websockets.__version__.split(".")[0]) >= 14:
-        connect_kwargs["proxy"] = True
+    if hasattr(websockets, "__version__") and int(websockets.__version__.split(".")[0]) >= 14:
+        connect_kwargs["proxy"] = None  # 禁用代理，避免用户系统代理干扰
     async with websockets.connect(CLOUD_WS_URL, **connect_kwargs) as _raw_ws:
 
         # 包装 send/recv，统一打印收发消息
