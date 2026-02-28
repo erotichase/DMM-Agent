@@ -7,30 +7,30 @@ VENV="$SCRIPT_DIR/.venv"
 CONFIG="$SCRIPT_DIR/config.json"
 
 # ─── Dev 用户表 (./run.sh a|b|c|d|e) ───
-declare -A DEV_TG_IDS=(
-    [a]=111111111  [b]=222222222  [c]=333333333
-    [d]=444444444  [e]=555555555
-)
-declare -A DEV_NAMES=(
-    [a]="Dev User A"  [b]="Dev User B"  [c]="Dev User C"
-    [d]="Dev User D"  [e]="Dev User E"
-)
+_dev_lookup() {
+    case "$1" in
+        a) TG_ID=111111111; USER_NAME="Dev User A" ;;
+        b) TG_ID=222222222; USER_NAME="Dev User B" ;;
+        c) TG_ID=333333333; USER_NAME="Dev User C" ;;
+        d) TG_ID=444444444; USER_NAME="Dev User D" ;;
+        e) TG_ID=555555555; USER_NAME="Dev User E" ;;
+        *) return 1 ;;
+    esac
+}
 
 # 处理 dev 用户参数
 DEV_USER="${1:-}"
 if [ -n "$DEV_USER" ]; then
     DEV_USER=$(echo "$DEV_USER" | tr '[:upper:]' '[:lower:]')
-    if [ -z "${DEV_TG_IDS[$DEV_USER]+x}" ]; then
+    if ! _dev_lookup "$DEV_USER"; then
         echo "用法: ./run.sh [a|b|c|d|e]"
         echo ""
         for key in a b c d e; do
-            echo "  $key  →  ${DEV_NAMES[$key]} (tg_id=${DEV_TG_IDS[$key]})"
+            _dev_lookup "$key"
+            echo "  $key  →  $USER_NAME (tg_id=$TG_ID)"
         done
         exit 1
     fi
-
-    TG_ID="${DEV_TG_IDS[$DEV_USER]}"
-    USER_NAME="${DEV_NAMES[$DEV_USER]}"
 
     # 用 python 更新 config.json（保留其他字段）
     python3 -c "

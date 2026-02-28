@@ -516,6 +516,8 @@ def build_auth_payload() -> dict:
         "capabilities": {
             "has_ffprobe": _HAS_FFPROBE,
             "platform": platform.system().lower(),
+            "os_version": platform.platform(terse=True),
+            "arch": platform.machine(),
             "python_version": platform.python_version(),
             "version": VERSION,
         },
