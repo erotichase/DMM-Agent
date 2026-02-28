@@ -378,14 +378,17 @@ def _list_videos_win(base_dir: str) -> list[str] | None:
 
     # 构建 dir /s /b 命令，每个扩展名一个通配符
     patterns = " ".join(f'"{base_dir}\\*.{ext.lstrip(".")}"' for ext in VIDEO_EXTENSIONS)
-    cmd = f'cmd /c chcp 65001 >nul & dir /s /b {patterns} 2>nul'
-
+    # cmd /U: dir 输出 UTF-16LE（对管道/重定向生效），正确处理 Unicode 文件名
     try:
         result = subprocess.run(
-            cmd, shell=True, capture_output=True, timeout=120,
+            ["cmd", "/U", "/c", f"dir /s /b {patterns} 2>nul"],
+            capture_output=True, timeout=120,
         )
         # dir /s /b 找不到文件时 returncode=1，stdout 为空
-        output = result.stdout.decode("utf-8", errors="replace").strip()
+        raw = result.stdout
+        if not raw:
+            return []
+        output = raw.decode("utf-16-le", errors="replace").strip()
         if not output:
             return []
         return [line for line in output.splitlines() if line.strip()]
