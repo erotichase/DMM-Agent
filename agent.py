@@ -38,6 +38,8 @@ else:
     _config = dict(_DEFAULT_CONFIG)
 
 IS_DEV = _config.get("DEV", False)
+DEV_TG_ID = _config.get("DEV_TG_ID", 111111111)
+DEV_USER_NAME = _config.get("DEV_USER_NAME", "Dev User A")
 CLOUD_WS_URL = _config.get("CLOUD_WS_URL", _DEV_WS_URL if IS_DEV else _PROD_WS_URL)
 DEVICE_TOKEN = _config.get("DEVICE_TOKEN", "")
 BASE_DIRS = _config.get("BASE_DIRS", [])
@@ -1402,13 +1404,14 @@ def dev_auto_bind() -> str:
     api_base = _derive_api_base()
     bind_url = f"{api_base}/api/v1/auth/dev-bind"
 
-    logger.info("开发环境自动绑定...")
+    logger.info("开发环境自动绑定 (tg_id=%s, %s)...", DEV_TG_ID, DEV_USER_NAME)
 
+    bind_body = json.dumps({"tg_id": DEV_TG_ID, "display_name": DEV_USER_NAME}).encode()
     req = urllib.request.Request(
         bind_url,
         method="POST",
         headers={"Content-Type": "application/json"},
-        data=b"{}",
+        data=bind_body,
     )
 
     try:

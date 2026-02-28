@@ -27,8 +27,8 @@ cp config.example.json config.json
 **Linux/macOS：**
 
 ```bash
-pip install websockets
-python3 agent.py
+./run.sh        # 默认用户启动
+./run.sh a      # 以 Dev User A 启动（开发模式）
 ```
 
 **Windows：**
@@ -37,7 +37,7 @@ python3 agent.py
 .\run.ps1
 ```
 
-`run.ps1` 会自动创建 venv、安装依赖并启动 agent。
+`run.sh` / `run.ps1` 会自动创建 venv、安装依赖并启动 agent。
 
 ### 3. 首次绑定
 
@@ -61,13 +61,14 @@ python3 agent.py
 
 所有配置通过 `config.json` 管理（已加入 .gitignore，代码更新不会覆盖）。
 
-| 字段           | 必填 | 说明                                                              |
-| -------------- | ---- | ----------------------------------------------------------------- |
-| `BASE_DIRS`    | 是   | 视频扫描目录列表，绝对路径                                        |
-| `TARGET_DIRS`  | 是   | 整理目标目录列表，优先使用第一个                                  |
-| `DEVICE_TOKEN` | 否   | 设备令牌（首次启动自动获取）                                      |
-| `FFPROBE_PATH` | 否   | ffprobe 路径（Windows 必填，Linux/macOS 留空自动检测）            |
-| `CLOUD_WS_URL` | 否   | 云端 WebSocket 地址（默认根据环境自动选择，一般无需手动指定）     |
+| 字段           | 必填 | 说明                                                          |
+| -------------- | ---- | ------------------------------------------------------------- |
+| `BASE_DIRS`    | 是   | 视频扫描目录列表，绝对路径                                    |
+| `TARGET_DIRS`  | 是   | 整理目标目录列表，优先使用第一个                              |
+| `DEVICE_TOKEN` | 否   | 设备令牌（首次启动自动获取）                                  |
+| `FFPROBE_PATH` | 否   | ffprobe 路径（Windows 必填，Linux/macOS 留空自动检测）        |
+| `CLOUD_WS_URL` | 否   | 云端 WebSocket 地址（默认根据环境自动选择，一般无需手动指定） |
+| `DEV`          | 否   | 开发模式开关（默认 `false`，启用后自动调用 `/dev-bind` 绑定） |
 
 **配置示例：**
 
@@ -140,6 +141,22 @@ F:/JAV/桜空もも/JUR-582/JUR-582.mp4
 | MOVE      | 按元数据将视频移动到标准目录结构                     |
 | ORGANIZE  | 按 `ORGANIZE_PATTERN` 模板自动整理文件到 TARGET_DIRS |
 | OPEN_FILE | 打开指定视频文件（远程播放，不经过任务队列直接处理） |
+
+## 开发模式（多用户切换）
+
+`run.sh` 支持通过参数快速切换 dev 用户，自动写入 config.json 并清空 token 触发重新绑定：
+
+```bash
+./run.sh a    # Dev User A (tg_id=111111111)
+./run.sh b    # Dev User B (tg_id=222222222)
+./run.sh c    # Dev User C (tg_id=333333333)
+./run.sh d    # Dev User D (tg_id=444444444)
+./run.sh e    # Dev User E (tg_id=555555555)
+```
+
+前端登录页（`DEV MODE`）同步提供 A-E 五个用户按钮，选择对应用户登录即可看到该用户 Agent 同步的数据。
+
+> 需要后端 `DEBUG=true`，生产环境 dev 端点返回 403。
 
 ## 常见问题
 

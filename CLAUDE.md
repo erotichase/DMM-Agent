@@ -52,7 +52,7 @@ python3 -m pytest test_agent.py -v  # 运行测试（如存在）
 
 `config.json`（gitignore）覆盖 `_DEFAULT_CONFIG` 内置默认值。绑定成功后 `DEVICE_TOKEN` 自动通过 `_persist_token()` 写回 config.json。
 
-开发模式 `"DEV": true`：自动调用 `/api/v1/auth/dev-bind` 绑定，websockets v14+ 启用 proxy 支持。
+开发模式 `"DEV": true`：自动调用 `/api/v1/auth/dev-bind` 绑定（携带 `DEV_TG_ID` + `DEV_USER_NAME`），websockets v14+ 启用 proxy 支持。`run.sh a|b|c|d|e` 可快速切换 5 个固定 dev 用户（111111111-555555555），自动写入 config.json 并清空 DEVICE_TOKEN。
 
 ## 关键模式
 
