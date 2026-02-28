@@ -333,14 +333,40 @@ def sanitize_dirname(name: str) -> str:
 # 本地文件扫描
 # ═══════════════════════════════════════════════════════════════
 
-def scan_local_files(include_target: bool = True) -> list[dict]:
+def _list_videos_win(base_dir: str) -> list[str] | None:
+    """Windows: 使用 dir /s /b 快速递归列出视频文件，返回绝对路径列表。
+
+    失败返回 None（由调用方降级到 rglob）。空列表 [] 表示无文件。
+    """
+    import subprocess
+
+    # 构建 dir /s /b 命令，每个扩展名一个通配符
+    patterns = " ".join(f'"{base_dir}\\*.{ext.lstrip(".")}"' for ext in VIDEO_EXTENSIONS)
+    cmd = f'cmd /c chcp 65001 >nul & dir /s /b {patterns} 2>nul'
+
+    try:
+        result = subprocess.run(
+            cmd, shell=True, capture_output=True, timeout=120,
+        )
+        # dir /s /b 找不到文件时 returncode=1，stdout 为空
+        output = result.stdout.decode("utf-8", errors="replace").strip()
+        if not output:
+            return []
+        return [line for line in output.splitlines() if line.strip()]
+    except Exception as exc:
+        logger.warning("dir /s /b 执行失败，降级到 rglob: %s", exc)
+        return None
+
+
+def scan_local_files(include_target: bool = True, skip_probe: bool = False) -> list[dict]:
     """扫描视频文件，返回 [{code, paths, size, res?, meta?}]
 
     Args:
         include_target: True=扫描 BASE_DIRS + TARGET_DIRS（sync 用），
                         False=仅扫描 BASE_DIRS（scan/organize 用）
+        skip_probe: True=跳过 ffprobe 探测（SCAN/ORGANIZE 用，加速返回）
     """
-    code_files: dict[str, list[tuple[int, str, int, dict | None]]] = {}
+    code_files: dict[str, list[tuple[int, str, int, Path]]] = {}
 
     # 构建扫描目录列表（去重，防止子目录重叠导致重复扫描）
     dirs_to_scan = list(BASE_DIRS)
@@ -360,15 +386,19 @@ def scan_local_files(include_target: bool = True) -> list[dict]:
             logger.warning("扫描目录不存在: %s", base_dir)
             continue
 
-        for path in root.rglob("*"):
-            if not path.is_file():
-                continue
-            if path.suffix.lower() not in VIDEO_EXTENSIONS:
-                continue
-            if path.name == SENTINEL_NAME:
-                continue
-            # 排除 .dmm-tmp 传输中的临时文件
-            if path.name.endswith(".dmm-tmp"):
+        # Windows: dir /s /b 快速列表，失败降级到 rglob
+        video_paths = None
+        if sys.platform == "win32":
+            video_paths = _list_videos_win(base_dir)
+
+        if video_paths is not None:
+            iter_paths = (Path(p) for p in video_paths)
+        else:
+            iter_paths = (p for p in root.rglob("*")
+                          if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS)
+
+        for path in iter_paths:
+            if path.name == SENTINEL_NAME or path.name.endswith(".dmm-tmp"):
                 continue
 
             code = extract_code_from_filename(path.name)
@@ -385,14 +415,32 @@ def scan_local_files(include_target: bool = True) -> list[dict]:
             except OSError:
                 file_size = 0
 
-            # ffprobe 探测（仅每个 code 的第一个文件，避免重复 fork 进程）
-            meta = None
-            if _HAS_FFPROBE and code not in code_files:
-                meta = probe_video_metadata(path)
-
             if code not in code_files:
                 code_files[code] = []
-            code_files[code].append((cd_num, rel_path, file_size, meta))
+            code_files[code].append((cd_num, rel_path, file_size, path))
+
+    # ffprobe 后置并发探测（skip_probe=True 时跳过，SCAN/ORGANIZE 用）
+    code_meta: dict[str, dict] = {}
+    if not skip_probe and _HAS_FFPROBE:
+        # 每个 code 取第一个文件的绝对路径
+        to_probe: list[tuple[str, Path]] = []
+        for code, file_list in code_files.items():
+            to_probe.append((code, file_list[0][3]))
+
+        # 按路径排序减少 HDD 磁头随机寻道
+        to_probe.sort(key=lambda x: str(x[1]))
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {pool.submit(probe_video_metadata, p): c for c, p in to_probe}
+            for future in as_completed(futures):
+                c = futures[future]
+                try:
+                    meta = future.result()
+                    if meta:
+                        code_meta[c] = meta
+                except Exception:
+                    pass
 
     results = []
     for code, file_list in code_files.items():
@@ -400,8 +448,7 @@ def scan_local_files(include_target: bool = True) -> list[dict]:
         total_size = sum(f[2] for f in file_list)
         paths = [f[1] for f in file_list]
 
-        # 用任一文件的元数据确定分辨率（probe 的不一定排在第一个）
-        first_meta = next((f[3] for f in file_list if f[3] is not None), None)
+        first_meta = code_meta.get(code)
         res = None
         meta_out = None
         if first_meta:
@@ -911,7 +958,7 @@ def _execute_scan(task_id: int, params: dict) -> dict:
     """执行扫描任务，返回文件清单 + 去重番号列表"""
     if not BASE_DIRS:
         return {"task_id": task_id, "status": "FAILED", "error": "未配置扫描目录 (BASE_DIRS)"}
-    files = scan_local_files(include_target=False)
+    files = scan_local_files(include_target=False, skip_probe=True)
     codes = list(dict.fromkeys(f["code"] for f in files))
     return {
         "task_id": task_id,
@@ -937,7 +984,7 @@ def _execute_organize(task_id: int, params: dict) -> dict:
         return {"task_id": task_id, "status": "FAILED", "error": "TARGET_DIRS not configured"}
 
     target_base = TARGET_DIRS[0]
-    files = scan_local_files(include_target=False)
+    files = scan_local_files(include_target=False, skip_probe=True)
     # 按 code 索引文件
     code_to_file = {}
     for f in files:
