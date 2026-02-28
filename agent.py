@@ -273,7 +273,7 @@ def probe_video_metadata(filepath: Path) -> dict | None:
     import subprocess
     try:
         result = subprocess.run(
-            [_FFPROBE_CMD, "-v", "quiet", "-print_format", "json",
+            [_FFPROBE_CMD, "-v", "error", "-print_format", "json",
              "-show_streams", str(filepath)],
             capture_output=True, timeout=15,
         )
@@ -281,8 +281,8 @@ def probe_video_metadata(filepath: Path) -> dict | None:
             _ffprobe_fail_count += 1
             if _ffprobe_fail_count <= 5 or _ffprobe_fail_count % 50 == 0:
                 stderr = result.stderr.decode("utf-8", errors="replace")[:200]
-                logger.warning("ffprobe 返回非零: code=%d, stderr=%s (fail #%d)",
-                               result.returncode, stderr, _ffprobe_fail_count)
+                logger.warning("ffprobe 返回非零: code=%d, file=%s, stderr=%s (fail #%d)",
+                               result.returncode, filepath, stderr, _ffprobe_fail_count)
             return None
         data = json.loads(result.stdout.decode("utf-8", errors="replace"))
         video_stream = None
