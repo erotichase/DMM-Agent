@@ -266,22 +266,6 @@ def update_sentinel_device_id(device_id: int):
 _ffprobe_fail_count = 0  # 累计失败次数（前 5 次打日志，之后每 50 次打一次）
 
 
-def _win_short_path(path: str) -> str:
-    """Windows: 转换为 8.3 短路径，解决 ffprobe 无法处理 Unicode 路径的问题。"""
-    if os.name != "nt":
-        return path
-    try:
-        import ctypes
-        buf_size = ctypes.windll.kernel32.GetShortPathNameW(path, None, 0)
-        if buf_size == 0:
-            return path
-        buf = ctypes.create_unicode_buffer(buf_size)
-        ctypes.windll.kernel32.GetShortPathNameW(path, buf, buf_size)
-        return buf.value
-    except Exception:
-        return path
-
-
 def probe_video_metadata(filepath: Path) -> dict | None:
     """探测视频元数据（分辨率/编码/码率/音频），失败返回 None"""
     global _ffprobe_fail_count
@@ -289,10 +273,12 @@ def probe_video_metadata(filepath: Path) -> dict | None:
         return None
     import subprocess
     try:
+        # cwd=父目录 + 只传文件名，绕过 ffprobe 在 Windows 上无法处理 Unicode 目录路径的问题
         result = subprocess.run(
             [_FFPROBE_CMD, "-v", "error", "-print_format", "json",
-             "-show_streams", _win_short_path(str(filepath))],
+             "-show_streams", filepath.name],
             capture_output=True, timeout=15,
+            cwd=str(filepath.parent),
         )
         if result.returncode != 0:
             _ffprobe_fail_count += 1
