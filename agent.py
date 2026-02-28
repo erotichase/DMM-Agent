@@ -266,53 +266,20 @@ def update_sentinel_device_id(device_id: int):
 _ffprobe_fail_count = 0  # 累计失败次数（前 5 次打日志，之后每 50 次打一次）
 
 
-def _win_short_path(path: str) -> str:
-    """Windows: 尝试转换为 8.3 短路径，避免 Unicode 路径导致 subprocess cwd 失败。"""
-    try:
-        import ctypes
-        buf_size = ctypes.windll.kernel32.GetShortPathNameW(path, None, 0)
-        if buf_size == 0:
-            return path
-        buf = ctypes.create_unicode_buffer(buf_size)
-        ctypes.windll.kernel32.GetShortPathNameW(path, buf, buf_size)
-        return buf.value
-    except Exception:
-        return path
-
-
-def _run_ffprobe(filepath: Path) -> "subprocess.CompletedProcess":
-    """运行 ffprobe，多策略应对 Windows Unicode 路径问题。
-
-    策略 1: cwd=父目录(8.3短路径) + 只传文件名（文件名是 ASCII 番号）
-    策略 2: Python 打开文件后通过 stdin pipe 传给 ffprobe，完全绕过路径编码
-    """
-    import subprocess
-    cmd_base = [_FFPROBE_CMD, "-v", "error", "-print_format", "json", "-show_streams"]
-    parent_cwd = str(filepath.parent)
-    if sys.platform == "win32":
-        parent_cwd = _win_short_path(parent_cwd)
-    try:
-        return subprocess.run(
-            cmd_base + [filepath.name],
-            capture_output=True, timeout=15, cwd=parent_cwd,
-        )
-    except OSError:
-        # cwd 设置失败（WinError 267 等，8.3 短路径不可用）
-        # 回退：Python 用宽字符 API 打开文件，通过 pipe 传给 ffprobe
-        with open(filepath, "rb") as f:
-            return subprocess.run(
-                cmd_base + ["-i", "pipe:0"],
-                stdin=f, capture_output=True, timeout=15,
-            )
-
-
 def probe_video_metadata(filepath: Path) -> dict | None:
     """探测视频元数据（分辨率/编码/码率/音频），失败返回 None"""
     global _ffprobe_fail_count
     if not _HAS_FFPROBE:
         return None
+    import subprocess
     try:
-        result = _run_ffprobe(filepath)
+        # cwd=父目录 + 只传文件名，避免 ffprobe 处理长路径或特殊字符
+        result = subprocess.run(
+            [_FFPROBE_CMD, "-v", "error", "-print_format", "json",
+             "-show_streams", filepath.name],
+            capture_output=True, timeout=15,
+            cwd=str(filepath.parent),
+        )
         if result.returncode != 0:
             _ffprobe_fail_count += 1
             if _ffprobe_fail_count <= 5 or _ffprobe_fail_count % 50 == 0:
