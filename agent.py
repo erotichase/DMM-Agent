@@ -346,9 +346,10 @@ def _list_videos_win(base_dir: str) -> list[str] | None:
     # 构建 dir /s /b 命令，每个扩展名一个通配符
     patterns = " ".join(f'"{base_dir}\\*.{ext.lstrip(".")}"' for ext in VIDEO_EXTENSIONS)
     # cmd /U: dir 输出 UTF-16LE（对管道/重定向生效），正确处理 Unicode 文件名
+    # 用字符串传参，避免 list2cmdline 对内部引号二次转义
     try:
         result = subprocess.run(
-            ["cmd", "/U", "/c", f"dir /s /b {patterns} 2>nul"],
+            f"cmd /U /c dir /s /b {patterns} 2>nul",
             capture_output=True, timeout=120,
         )
         # dir /s /b 找不到文件时 returncode=1，stdout 为空
