@@ -284,7 +284,7 @@ def _run_ffprobe(filepath: Path) -> "subprocess.CompletedProcess":
     """运行 ffprobe，多策略应对 Windows Unicode 路径问题。
 
     策略 1: cwd=父目录(8.3短路径) + 只传文件名（文件名是 ASCII 番号）
-    策略 2: 直接传完整路径（无 cwd），兼容新版 ffprobe
+    策略 2: Python 打开文件后通过 stdin pipe 传给 ffprobe，完全绕过路径编码
     """
     import subprocess
     cmd_base = [_FFPROBE_CMD, "-v", "error", "-print_format", "json", "-show_streams"]
@@ -297,11 +297,13 @@ def _run_ffprobe(filepath: Path) -> "subprocess.CompletedProcess":
             capture_output=True, timeout=15, cwd=parent_cwd,
         )
     except OSError:
-        # cwd 设置失败（WinError 267 等），回退到直接传完整路径
-        return subprocess.run(
-            cmd_base + ["-i", str(filepath)],
-            capture_output=True, timeout=15,
-        )
+        # cwd 设置失败（WinError 267 等，8.3 短路径不可用）
+        # 回退：Python 用宽字符 API 打开文件，通过 pipe 传给 ffprobe
+        with open(filepath, "rb") as f:
+            return subprocess.run(
+                cmd_base + ["-i", "pipe:0"],
+                stdin=f, capture_output=True, timeout=15,
+            )
 
 
 def probe_video_metadata(filepath: Path) -> dict | None:
