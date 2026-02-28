@@ -104,6 +104,7 @@ _shutdown_event = None  # 优雅退出事件
 _ws_connection = None  # 当前 WebSocket 连接
 _last_sync_version: int = 0  # 增量同步版本号
 _last_synced_codes: set[str] = set()  # 上次同步的番号集合
+_my_organized_codes: set[str] = set()  # 本会话 ORGANIZE 过的番号
 
 def _detect_ffprobe() -> str:
     """检测 ffprobe 路径（优先配置路径，其次系统 PATH），返回可执行路径或空串。
@@ -419,11 +420,30 @@ def scan_local_files(include_target: bool = True) -> list[dict]:
     return results
 
 
+def _get_my_files() -> list[dict]:
+    """返回属于当前用户的文件列表
+
+    BASE_DIRS 文件 + 本会话 ORGANIZE 过的文件（从 TARGET_DIRS 捞回）。
+    初始 SYNC 只上报 BASE_DIRS，ORGANIZE 后按需补报。
+    """
+    base_files = scan_local_files(include_target=False)
+    if not _my_organized_codes:
+        return base_files
+
+    all_files = scan_local_files(include_target=True)
+    base_codes = {f["code"] for f in base_files}
+    code_to_file = {f["code"]: f for f in base_files}
+    for f in all_files:
+        if f["code"] in _my_organized_codes and f["code"] not in base_codes:
+            code_to_file[f["code"]] = f
+    return list(code_to_file.values())
+
+
 def build_sync_report(incremental: bool = True) -> dict | list[dict]:
     """构建同步报告（增量 diff 或全量分片）"""
     global _last_synced_codes
 
-    files = scan_local_files()
+    files = _get_my_files()
     current_codes = {f["code"] for f in files}
 
     # 目录指纹
@@ -1106,8 +1126,8 @@ async def ws_session():
                     await _recv_until_sync_ack()
 
         if BASE_DIRS:
-            files = scan_local_files()
-            logger.info("扫描完成: %d 个番号", len(files))
+            my_files = _get_my_files()
+            logger.info("扫描完成: %d 个番号", len(my_files))
             await _send_sync_report(build_sync_report(), await_ack=True)
 
         # Phase 3: 心跳 + 任务队列 + 消息循环
@@ -1127,6 +1147,7 @@ async def ws_session():
 
         async def task_worker():
             """单 worker 顺序执行任务（保证文件操作串行化）"""
+            global _last_synced_codes, _my_organized_codes
 
             async def _flush_progress(pq):
                 while not pq.empty():
@@ -1172,10 +1193,11 @@ async def ws_session():
                 elif status == "FAILED":
                     logger.warning("任务失败: #%s - %s", task_id, result.get("error", ""))
 
-                # ORGANIZE 成功且有文件移动 → 重新同步
+                # ORGANIZE 成功 → 记录已整理的 code + 发送全量 SYNC 更新路径
                 if action == "ORGANIZE" and status == "SUCCESS":
-                    organized = result.get("result", {}).get("organized", 0)
-                    if organized > 0:
+                    organized_codes = result.get("result", {}).get("organized_codes", [])
+                    if organized_codes:
+                        _my_organized_codes.update(organized_codes)
                         await _send_sync_report(build_sync_report(incremental=False))
 
                 try:
@@ -1247,7 +1269,7 @@ async def ws_session():
                     if new_version > 0:
                         _last_sync_version = new_version
                         # 重新扫描获取当前 codes 作为下次 diff 基准
-                        _last_synced_codes = {f["code"] for f in scan_local_files()}
+                        _last_synced_codes = {f["code"] for f in _get_my_files()}
 
                 elif msg_type == "SYNC_SHARD_ACK":
                     pass  # 分片确认
