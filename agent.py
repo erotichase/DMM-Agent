@@ -1179,15 +1179,7 @@ async def ws_session():
                 if await_ack:
                     await _recv_until_sync_ack()
 
-        if BASE_DIRS:
-            my_files = _get_my_files()
-            logger.info("扫描完成: %d 个番号", len(my_files))
-            await _send_sync_report(build_sync_report(), await_ack=True)
-
-        # Phase 3: 心跳 + 任务队列 + 消息循环
-        task_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
-        TASK_TIMEOUT = 300  # 5 分钟任务超时
-
+        # 心跳提前启动（Phase 2 扫描可能阻塞数分钟，需保持心跳避免 Server 超时断连）
         async def heartbeat_loop():
             while not _shutdown_event.is_set():
                 jitter = random.uniform(-5, 5)
@@ -1198,6 +1190,19 @@ async def ws_session():
                     await ws.send(json.dumps({"type": "PING", "payload": {}}))
                 except Exception:
                     break
+
+        heartbeat_task = asyncio.create_task(heartbeat_loop())
+
+        if BASE_DIRS:
+            loop = asyncio.get_event_loop()
+            my_files = await loop.run_in_executor(None, _get_my_files)
+            logger.info("扫描完成: %d 个番号", len(my_files))
+            report = await loop.run_in_executor(None, build_sync_report)
+            await _send_sync_report(report, await_ack=True)
+
+        # Phase 3: 心跳 + 任务队列 + 消息循环
+        task_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+        TASK_TIMEOUT = 300  # 5 分钟任务超时
 
         async def task_worker():
             """单 worker 顺序执行任务（保证文件操作串行化）"""
@@ -1347,7 +1352,6 @@ async def ws_session():
                     _shutdown_event.set()
                     break
 
-        heartbeat_task = asyncio.create_task(heartbeat_loop())
         worker_task = asyncio.create_task(task_worker())
         message_task = asyncio.create_task(message_loop())
 
