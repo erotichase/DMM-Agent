@@ -365,13 +365,15 @@ def _list_videos_win(base_dir: str) -> list[str] | None:
         return None
 
 
-def scan_local_files(include_target: bool = True, skip_probe: bool = False) -> list[dict]:
+def scan_local_files(include_target: bool = True, skip_probe: bool = False,
+                     on_progress: "Callable[[int], None] | None" = None) -> list[dict]:
     """扫描视频文件，返回 [{code, paths, size, res?, meta?}]
 
     Args:
         include_target: True=扫描 BASE_DIRS + TARGET_DIRS（sync 用），
                         False=仅扫描 BASE_DIRS（scan/organize 用）
         skip_probe: True=跳过 ffprobe 探测（SCAN/ORGANIZE 用，加速返回）
+        on_progress: 可选回调，每发现一个新番号时调用 on_progress(current_code_count)
     """
     code_files: dict[str, list[tuple[int, str, int, Path]]] = {}
 
@@ -422,9 +424,12 @@ def scan_local_files(include_target: bool = True, skip_probe: bool = False) -> l
             except OSError:
                 file_size = 0
 
-            if code not in code_files:
+            is_new_code = code not in code_files
+            if is_new_code:
                 code_files[code] = []
             code_files[code].append((cd_num, rel_path, file_size, path))
+            if is_new_code and on_progress is not None:
+                on_progress(len(code_files))
 
     # ffprobe 后置并发探测（skip_probe=True 时跳过，SCAN/ORGANIZE 用）
     code_meta: dict[str, dict] = {}
@@ -474,13 +479,13 @@ def scan_local_files(include_target: bool = True, skip_probe: bool = False) -> l
     return results
 
 
-def _get_my_files() -> list[dict]:
+def _get_my_files(on_progress: "Callable[[int], None] | None" = None) -> list[dict]:
     """返回属于当前用户的文件列表
 
     BASE_DIRS 文件 + 本会话 ORGANIZE 过的文件（从 TARGET_DIRS 捞回）。
     初始 SYNC 只上报 BASE_DIRS，ORGANIZE 后按需补报。
     """
-    base_files = scan_local_files(include_target=False)
+    base_files = scan_local_files(include_target=False, on_progress=on_progress)
     if not _my_organized_codes:
         return base_files
 
@@ -587,6 +592,7 @@ def build_auth_payload() -> dict:
         "nonce": nonce,
         "signature": signature,
         "device_name": socket.gethostname()[:60],
+        "pre_scan": True,
         "capabilities": {
             "has_ffprobe": _HAS_FFPROBE,
             "platform": platform.system().lower(),
@@ -1195,7 +1201,53 @@ async def ws_session():
 
         if BASE_DIRS:
             loop = asyncio.get_event_loop()
-            my_files = await loop.run_in_executor(None, _get_my_files)
+
+            # 预扫描进度上报：线程安全计数器 + async 定时发送
+            _pre_scan_count = 0
+            _pre_scan_done = False
+
+            def _on_scan_progress(count: int):
+                nonlocal _pre_scan_count
+                _pre_scan_count = count
+
+            async def _pre_scan_reporter():
+                """每 2 秒发送一次 PRE_SCAN_STATUS"""
+                last_sent = 0
+                while not _pre_scan_done:
+                    await asyncio.sleep(2)
+                    current = _pre_scan_count
+                    if current != last_sent:
+                        try:
+                            await ws.send(json.dumps({
+                                "type": "PRE_SCAN_STATUS",
+                                "payload": {"scanned": current, "total": 0},
+                            }))
+                        except Exception:
+                            break
+                        last_sent = current
+
+            reporter_task = asyncio.create_task(_pre_scan_reporter())
+            try:
+                my_files = await loop.run_in_executor(
+                    None, lambda: _get_my_files(on_progress=_on_scan_progress),
+                )
+            finally:
+                _pre_scan_done = True
+                reporter_task.cancel()
+                try:
+                    await reporter_task
+                except asyncio.CancelledError:
+                    pass
+
+            # 发送最终进度
+            try:
+                await ws.send(json.dumps({
+                    "type": "PRE_SCAN_STATUS",
+                    "payload": {"scanned": len(my_files), "total": len(my_files)},
+                }))
+            except Exception:
+                pass
+
             logger.info("扫描完成: %d 个番号", len(my_files))
             report = await loop.run_in_executor(None, build_sync_report)
             await _send_sync_report(report, await_ack=True)
