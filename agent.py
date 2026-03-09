@@ -1097,7 +1097,9 @@ def _execute_move(task_id: int, params: dict, report_progress: Callable[[int, st
         try:
             src.rename(dest)
         except OSError as e:
-            if e.errno == errno_mod.EXDEV or (sys.platform == "win32" and e.winerror == 5):
+            logger.info("rename 失败 %s → %s: errno=%s winerror=%s %s",
+                        src.name, dest.parent.name, e.errno, getattr(e, 'winerror', None), e)
+            if e.errno == errno_mod.EXDEV or (sys.platform == "win32" and getattr(e, 'winerror', 0) == 5):
                 # 跨盘 或 Windows 文件锁 → 降级为 copy+delete
                 tmp_dest = dest.with_name(dest.name + ".dmm-tmp")
                 try:
@@ -1120,12 +1122,15 @@ def _execute_move(task_id: int, params: dict, report_progress: Callable[[int, st
 
     # 统一清理 copy+delete 残留的源文件
     if deferred_deletes:
-        time.sleep(2)  # 等待 Defender/索引器释放文件锁
+        logger.info("延迟清理源文件: %d 个待删除", len(deferred_deletes))
+        time.sleep(2)
         still_locked = []
         for src in deferred_deletes:
             try:
                 src.unlink()
-            except OSError:
+            except OSError as e:
+                logger.info("源文件删除失败(第1轮) %s: errno=%s winerror=%s %s",
+                            src.name, e.errno, getattr(e, 'winerror', None), e)
                 still_locked.append(src)
         # 二次重试
         if still_locked:
