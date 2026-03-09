@@ -73,6 +73,7 @@ import time
 import unicodedata
 import uuid
 import errno as errno_mod
+from collections.abc import Callable
 from pathlib import Path
 
 logging.basicConfig(
@@ -366,7 +367,7 @@ def ensure_sentinel(base_dir: str) -> str:
     return fingerprint
 
 
-def update_sentinel_device_id(device_id: int):
+def update_sentinel_device_id(device_id: int) -> None:
     """鉴权成功后更新所有哨兵文件的设备 ID"""
     for base_dir in BASE_DIRS:
         sentinel_path = Path(base_dir) / SENTINEL_NAME
@@ -466,6 +467,11 @@ def _list_videos_win(base_dir: str) -> list[str] | None:
     """
     import subprocess
 
+    # 输入校验：防止 base_dir 中的 shell 元字符导致命令注入
+    if any(c in base_dir for c in ('&', '|', ';', '>', '<', '`', '$')):
+        logger.warning("base_dir 含不安全字符，跳过 Windows 快速扫描: %s", base_dir)
+        return None
+
     # 构建 dir /s /b 命令，每个扩展名一个通配符
     patterns = " ".join(f'"{base_dir}\\*.{ext.lstrip(".")}"' for ext in VIDEO_EXTENSIONS)
     # cmd /U: dir 输出 UTF-16LE（对管道/重定向生效），正确处理 Unicode 文件名
@@ -489,7 +495,7 @@ def _list_videos_win(base_dir: str) -> list[str] | None:
 
 
 def scan_local_files(include_target: bool = True, skip_probe: bool = False,
-                     on_progress: "Callable[[int], None] | None" = None) -> list[dict]:
+                     on_progress: Callable[[int], None] | None = None) -> list[dict]:
     """扫描视频文件，返回 [{code, paths, size, res?, meta?}]
 
     Args:
@@ -574,8 +580,8 @@ def scan_local_files(include_target: bool = True, skip_probe: bool = False,
                     meta = future.result()
                     if meta:
                         code_meta[c] = meta
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("ffprobe future 异常 (code=%s): %s", c, exc)
 
     results = _build_results_from(code_files, code_meta)
     return results
@@ -608,7 +614,7 @@ def _build_results_from(code_files: dict, code_meta: dict) -> list[dict]:
     return results
 
 
-def _get_my_files(on_progress: "Callable[[int], None] | None" = None) -> list[dict]:
+def _get_my_files(on_progress: Callable[[int], None] | None = None) -> list[dict]:
     """返回属于当前用户的文件列表
 
     BASE_DIRS 文件 + 本会话 ORGANIZE 过的文件（从 TARGET_DIRS 捞回）。
@@ -999,7 +1005,7 @@ def _cleanup_empty_dirs(moves: list[dict]) -> int:
     return cleaned
 
 
-def _execute_move(task_id: int, params: dict, report_progress=None, target_base: str = None) -> dict:
+def _execute_move(task_id: int, params: dict, report_progress: Callable[[int, str], None] | None = None, target_base: str | None = None) -> dict:
     """执行移动任务（支持跨盘、冲突处理）"""
     code = params.get("code", "")
     target_dir = params.get("target_dir", "")
@@ -1367,7 +1373,7 @@ async def ws_session():
         heartbeat_task = asyncio.create_task(heartbeat_loop())
 
         if BASE_DIRS:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
 
             # 尝试加载扫描缓存（跳过耗时的全量扫描）
             cache = _load_scan_cache()
@@ -1476,7 +1482,7 @@ async def ws_session():
                 timeout = _TASK_TIMEOUTS.get(action, _DEFAULT_TASK_TIMEOUT)
                 logger.info("执行任务: #%s %s (timeout=%ds)", task_id, action, timeout)
                 progress_q = queue.Queue()
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 future = loop.run_in_executor(None, execute_task, payload, progress_q)
                 deadline = loop.time() + timeout
                 result = None
@@ -1508,7 +1514,10 @@ async def ws_session():
                     organized_codes = result.get("result", {}).get("organized_codes", [])
                     if organized_codes:
                         _my_organized_codes.update(organized_codes)
-                        await _send_sync_report(build_sync_report(incremental=False))
+                        report = await loop.run_in_executor(
+                            None, lambda: build_sync_report(incremental=False)
+                        )
+                        await _send_sync_report(report)
 
                 try:
                     await ws.send(json.dumps({"type": "TASK_RESULT", "payload": result}))
@@ -1578,8 +1587,9 @@ async def ws_session():
                     new_version = payload.get("sync_version", 0)
                     if new_version > 0:
                         _last_sync_version = new_version
-                        # 重新扫描获取当前 codes 作为下次 diff 基准
-                        current_files = _get_my_files()
+                        # 重新扫描获取当前 codes 作为下次 diff 基准（异步执行防止阻塞）
+                        loop = asyncio.get_running_loop()
+                        current_files = await loop.run_in_executor(None, _get_my_files)
                         _last_synced_codes = {f["code"] for f in current_files}
                         # 持久化完整缓存（下次启动跳过扫描 + 增量 diff）
                         _save_scan_cache(current_files, sync_version=new_version)
@@ -1593,7 +1603,11 @@ async def ws_session():
                     _last_sync_version = 0
                     _last_synced_codes = set()
                     _invalidate_scan_cache()
-                    await _send_sync_report(build_sync_report(incremental=False))
+                    loop = asyncio.get_running_loop()
+                    report = await loop.run_in_executor(
+                        None, lambda: build_sync_report(incremental=False)
+                    )
+                    await _send_sync_report(report)
 
                 elif msg_type == "TOKEN_ROTATE":
                     ack = _handle_token_rotate(payload)
@@ -1609,10 +1623,11 @@ async def ws_session():
 
         worker_task = asyncio.create_task(task_worker())
         message_task = asyncio.create_task(message_loop())
+        shutdown_task = asyncio.create_task(_shutdown_event.wait())
 
         # 等待信号或连接断开
         done, pending = await asyncio.wait(
-            [heartbeat_task, worker_task, message_task, asyncio.create_task(_shutdown_event.wait())],
+            [heartbeat_task, worker_task, message_task, shutdown_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
 
