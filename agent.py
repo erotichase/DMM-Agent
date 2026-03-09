@@ -1473,7 +1473,7 @@ async def ws_session():
                 _save_scan_cache(my_files)
 
                 logger.info("扫描完成: %d 个番号", len(my_files))
-                report = await loop.run_in_executor(None, build_sync_report)
+                report = await loop.run_in_executor(None, lambda: build_sync_report(prefetched_files=my_files))
                 await _send_sync_report(report, await_ack=True)
 
         # Phase 3: 心跳 + 任务队列 + 消息循环
