@@ -1068,8 +1068,9 @@ def _execute_move(task_id: int, params: dict, report_progress=None, target_base:
                     skipped += 1
                     continue
 
-        # EXDEV 跨文件系统降级，带重试（应对临时文件锁）
-        max_retries = 3
+        # EXDEV 跨文件系统降级，带重试（应对 Windows 文件锁：Defender/索引/缩略图等）
+        # 模拟资源管理器行为：多次重试 + 递增等待，给锁定程序释放句柄的时间
+        max_retries = 6
         for attempt in range(max_retries):
             try:
                 src.rename(dest)
@@ -1089,7 +1090,7 @@ def _execute_move(task_id: int, params: dict, report_progress=None, target_base:
                         raise
                     break
                 elif attempt < max_retries - 1:
-                    wait = 2 ** attempt  # 1s, 2s
+                    wait = min(2 ** attempt, 10)  # 1s, 2s, 4s, 8s, 10s
                     logger.info("文件被锁定，%ds 后重试 (%d/%d): %s", wait, attempt + 1, max_retries, src.name)
                     time.sleep(wait)
                 else:
