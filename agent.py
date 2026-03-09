@@ -1097,8 +1097,8 @@ def _execute_move(task_id: int, params: dict, report_progress: Callable[[int, st
             try:
                 src.rename(renamed_src)
                 src = renamed_src
-            except OSError:
-                pass
+            except OSError as e:
+                logger.debug("原地重命名失败 %s → %s: %s（将带原名移动）", src.name, dest.name, e)
 
         try:
             src.rename(dest)
@@ -1470,12 +1470,13 @@ async def ws_session():
                 future = loop.run_in_executor(None, execute_task, payload, progress_q)
                 deadline = loop.time() + timeout
                 result = None
+                timed_out = False
                 try:
                     while True:
                         await _flush_progress(progress_q)
                         remaining = deadline - loop.time()
                         if remaining <= 0:
-                            future.cancel()
+                            timed_out = True
                             result = {"task_id": task_id, "status": "FAILED", "error": f"Task timeout ({timeout // 60}min)"}
                             break
                         try:
@@ -1485,6 +1486,14 @@ async def ws_session():
                             continue
                 except Exception as e:
                     result = {"task_id": task_id, "status": "FAILED", "error": sanitize_error(str(e))}
+
+                # 超时后等待后台线程真正结束，防止下一个任务并发操作文件
+                if timed_out and not future.done():
+                    logger.info("等待超时任务 #%s 的后台线程结束...", task_id)
+                    try:
+                        await asyncio.wait_for(asyncio.wrap_future(future), timeout=60)
+                    except (asyncio.TimeoutError, Exception):
+                        logger.warning("超时任务 #%s 后台线程 60s 内未结束，继续", task_id)
                 await _flush_progress(progress_q)
 
                 status = result.get("status") if result else "None"
@@ -1523,7 +1532,7 @@ async def ws_session():
                     try:
                         task_queue.put_nowait(payload)
                     except asyncio.QueueFull:
-                        pass
+                        logger.warning("任务队列已满，丢弃缓冲任务: #%s", payload.get("task_id"))
             _buffered_messages.clear()
 
             while True:
