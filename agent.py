@@ -72,7 +72,7 @@ import sys
 import time
 import unicodedata
 import uuid
-import errno as errno_mod
+
 from collections.abc import Callable
 from pathlib import Path
 
@@ -1064,7 +1064,6 @@ def _execute_move(task_id: int, params: dict, report_progress: Callable[[int, st
     # 执行移动
     moved = 0
     skipped = 0
-    deferred_deletes: list[Path] = []  # copy+delete 后未能立即删除的源文件
     total = len(moves)
     for idx, m in enumerate(moves):
         dest: Path = m["dest"]
@@ -1092,66 +1091,24 @@ def _execute_move(task_id: int, params: dict, report_progress: Callable[[int, st
                     skipped += 1
                     continue
 
-        # 移动策略：
-        # 1. 文件名不对 → 原目录内 rename（同目录元数据操作，极快，几乎不受文件锁影响）
-        # 2. 同盘 → rename 到目标目录（零 IO，瞬间完成）
-        # 3. 跨盘（EXDEV）→ copy+delete（唯一需要复制字节的场景）
-        # 4. 同盘 rename 被锁（WinError 5）→ 降级为 copy+delete
+        # 同盘 rename（零 IO）；文件名不对时先原地重命名
         if src.name != dest.name:
-            # 先在原目录内重命名为目标文件名
             renamed_src = src.with_name(dest.name)
             try:
                 src.rename(renamed_src)
                 src = renamed_src
             except OSError:
-                pass  # 重命名失败不阻塞，后续移动时用原名
+                pass
 
         try:
             src.rename(dest)
         except OSError as e:
-            logger.info("rename 失败 %s → %s: errno=%s winerror=%s %s",
-                        src.name, dest.parent.name, e.errno, getattr(e, 'winerror', None), e)
-            if e.errno == errno_mod.EXDEV or (sys.platform == "win32" and getattr(e, 'winerror', 0) == 5):
-                # 跨盘 或 Windows 文件锁 → 降级为 copy+delete
-                tmp_dest = dest.with_name(dest.name + ".dmm-tmp")
-                try:
-                    shutil.copy2(str(src), str(tmp_dest))
-                    if tmp_dest.stat().st_size != src.stat().st_size:
-                        tmp_dest.unlink(missing_ok=True)
-                        raise OSError(f"Size mismatch after copy for {src.name}")
-                    tmp_dest.rename(dest)
-                except Exception:
-                    tmp_dest.unlink(missing_ok=True)
-                    raise
-                # 源文件删除延迟到所有移动完成后统一清理（Defender/索引器此时已释放锁）
-                deferred_deletes.append(src)
-            else:
-                raise
+            logger.error("移动失败 %s → %s: %s", src, dest, e)
+            raise
         moved += 1
         if report_progress and total > 0:
             pct = min(99, int((idx + 1) / total * 100))
             report_progress(pct, f"Moving file {idx + 1}/{total}...")
-
-    # 统一清理 copy+delete 残留的源文件
-    if deferred_deletes:
-        logger.info("延迟清理源文件: %d 个待删除", len(deferred_deletes))
-        time.sleep(2)
-        still_locked = []
-        for src in deferred_deletes:
-            try:
-                src.unlink()
-            except OSError as e:
-                logger.info("源文件删除失败(第1轮) %s: errno=%s winerror=%s %s",
-                            src.name, e.errno, getattr(e, 'winerror', None), e)
-                still_locked.append(src)
-        # 二次重试
-        if still_locked:
-            time.sleep(5)
-            for src in still_locked:
-                try:
-                    src.unlink()
-                except OSError:
-                    logger.warning("源文件删除失败（数据已到位）: %s", src.name)
 
     # 清理移动后留下的空目录（bottom-up，忽略系统垃圾文件）
     cleaned_dirs = _cleanup_empty_dirs(moves)
