@@ -1073,30 +1073,47 @@ def _execute_move(task_id: int, params: dict, report_progress=None, target_base:
                     skipped += 1
                     continue
 
-        # Windows 文件移动策略（模拟资源管理器行为）：
-        # rename() 需要 DELETE 权限，Defender/索引/缩略图等以非 FILE_SHARE_DELETE
-        # 方式打开文件时必定失败。改用 copy+delete：copy 只需 READ（几乎不会被阻塞），
-        # 文件到位后再删源文件，即使删除暂时失败，数据已安全到达目标。
-        tmp_dest = dest.with_name(dest.name + ".dmm-tmp")
-        try:
-            shutil.copy2(str(src), str(tmp_dest))
-            if tmp_dest.stat().st_size != src.stat().st_size:
-                tmp_dest.unlink(missing_ok=True)
-                raise OSError(f"Size mismatch after copy for {src.name}")
-            tmp_dest.rename(dest)
-        except Exception:
-            tmp_dest.unlink(missing_ok=True)
-            raise
-        # 删除源文件（带重试，容忍短暂锁定）
-        for attempt in range(5):
+        # 移动策略：
+        # 1. 文件名不对 → 原目录内 rename（同目录元数据操作，极快，几乎不受文件锁影响）
+        # 2. 同盘 → rename 到目标目录（零 IO，瞬间完成）
+        # 3. 跨盘（EXDEV）→ copy+delete（唯一需要复制字节的场景）
+        # 4. 同盘 rename 被锁（WinError 5）→ 降级为 copy+delete
+        if src.name != dest.name:
+            # 先在原目录内重命名为目标文件名
+            renamed_src = src.with_name(dest.name)
             try:
-                src.unlink()
-                break
+                src.rename(renamed_src)
+                src = renamed_src
             except OSError:
-                if attempt < 4:
-                    time.sleep(1)
-                else:
-                    logger.warning("源文件删除失败（数据已到位）: %s", src.name)
+                pass  # 重命名失败不阻塞，后续移动时用原名
+
+        try:
+            src.rename(dest)
+        except OSError as e:
+            if e.errno == errno_mod.EXDEV or (sys.platform == "win32" and e.winerror == 5):
+                # 跨盘 或 Windows 文件锁 → 降级为 copy+delete
+                tmp_dest = dest.with_name(dest.name + ".dmm-tmp")
+                try:
+                    shutil.copy2(str(src), str(tmp_dest))
+                    if tmp_dest.stat().st_size != src.stat().st_size:
+                        tmp_dest.unlink(missing_ok=True)
+                        raise OSError(f"Size mismatch after copy for {src.name}")
+                    tmp_dest.rename(dest)
+                except Exception:
+                    tmp_dest.unlink(missing_ok=True)
+                    raise
+                # 删除源文件（带重试，容忍短暂锁定）
+                for attempt in range(5):
+                    try:
+                        src.unlink()
+                        break
+                    except OSError:
+                        if attempt < 4:
+                            time.sleep(1)
+                        else:
+                            logger.warning("源文件删除失败（数据已到位）: %s", src.name)
+            else:
+                raise
         moved += 1
         if report_progress and total > 0:
             pct = min(99, int((idx + 1) / total * 100))
