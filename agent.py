@@ -1431,7 +1431,8 @@ async def ws_session():
 
         # Phase 3: 心跳 + 任务队列 + 消息循环
         task_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
-        TASK_TIMEOUT = 300  # 5 分钟任务超时
+        _TASK_TIMEOUTS = {"SCAN": 300, "ORGANIZE": 1800}  # SCAN 5min, ORGANIZE 30min
+        _DEFAULT_TASK_TIMEOUT = 300
 
         async def task_worker():
             """单 worker 顺序执行任务（保证文件操作串行化）"""
@@ -1452,11 +1453,12 @@ async def ws_session():
                     continue
                 task_id = payload.get("task_id")
                 action = payload.get("action")
-                logger.info("执行任务: #%s %s", task_id, action)
+                timeout = _TASK_TIMEOUTS.get(action, _DEFAULT_TASK_TIMEOUT)
+                logger.info("执行任务: #%s %s (timeout=%ds)", task_id, action, timeout)
                 progress_q = queue.Queue()
                 loop = asyncio.get_event_loop()
                 future = loop.run_in_executor(None, execute_task, payload, progress_q)
-                deadline = loop.time() + TASK_TIMEOUT
+                deadline = loop.time() + timeout
                 result = None
                 try:
                     while True:
@@ -1464,7 +1466,7 @@ async def ws_session():
                         remaining = deadline - loop.time()
                         if remaining <= 0:
                             future.cancel()
-                            result = {"task_id": task_id, "status": "FAILED", "error": "Task timeout (5min)"}
+                            result = {"task_id": task_id, "status": "FAILED", "error": f"Task timeout ({timeout // 60}min)"}
                             break
                         try:
                             result = await asyncio.wait_for(asyncio.shield(future), timeout=min(0.5, remaining))
