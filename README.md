@@ -164,8 +164,7 @@ F:/JAV/桜空もも/JUR-582/JUR-582.mp4
 
 Agent 启动时需要扫描 `BASE_DIRS` 下所有视频文件，文件多时可能耗时数分钟。为避免每次重启都全量重扫，Agent 会将扫描结果缓存到 `.scan_cache.json`：
 
-- **扫描中**每 50 个新番号增量刷盘，即使 Agent 意外崩溃也只需补扫未完成部分
-- **扫描完成**后写入完整缓存，SYNC_ACK 回来后补写 `sync_version`
+- **Pre-scan 完成**后写入缓存，SYNC_ACK 回来后补写 `sync_version`
 - **下次启动**命中缓存时直接恢复，跳过全量扫描（秒级启动）
 - **自动失效**：`BASE_DIRS` 配置变更、Cloud 端 SYNC_REJECT 时缓存自动清除
 

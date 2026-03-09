@@ -111,7 +111,6 @@ _my_organized_codes: set[str] = set()  # 本会话 ORGANIZE 过的番号
 # ═══════════════════════════════════════════════════════════════
 
 _SCAN_CACHE_FILE = os.path.join(_SCRIPT_DIR, ".scan_cache.json")
-_SCAN_CACHE_FLUSH_STEP = 50  # 每扫描 N 个新番号刷一次磁盘
 
 
 def _load_scan_cache() -> dict | None:
@@ -119,7 +118,6 @@ def _load_scan_cache() -> dict | None:
     try:
         with open(_SCAN_CACHE_FILE, "r", encoding="utf-8") as f:
             cache = _json_mod.load(f)
-        # 校验：BASE_DIRS 必须一致（目录变了缓存无效）
         if cache.get("base_dirs") != [os.path.normcase(os.path.abspath(d)) for d in BASE_DIRS]:
             logger.info("缓存失效: BASE_DIRS 已变更")
             return None
@@ -130,23 +128,19 @@ def _load_scan_cache() -> dict | None:
         return None
 
 
-def _save_scan_cache(files: list[dict], sync_version: int = 0,
-                     complete: bool = True) -> None:
-    """保存扫描缓存到磁盘"""
+def _save_scan_cache(files: list[dict], sync_version: int = 0) -> None:
+    """保存扫描缓存到磁盘（仅在 pre-scan 完成或 SYNC_ACK 时调用）"""
     cache = {
         "base_dirs": [os.path.normcase(os.path.abspath(d)) for d in BASE_DIRS],
         "files": files,
         "sync_version": sync_version,
-        "complete": complete,
         "cached_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     tmp = _SCAN_CACHE_FILE + ".tmp"
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             _json_mod.dump(cache, f, ensure_ascii=False)
-        # 原子替换
         if sys.platform == "win32":
-            # Windows: os.replace 是原子的
             os.replace(tmp, _SCAN_CACHE_FILE)
         else:
             os.rename(tmp, _SCAN_CACHE_FILE)
@@ -159,7 +153,7 @@ def _save_scan_cache(files: list[dict], sync_version: int = 0,
 
 
 def _invalidate_scan_cache() -> None:
-    """删除扫描缓存（SYNC_REJECT 或数据不一致时调用）"""
+    """删除扫描缓存"""
     try:
         os.unlink(_SCAN_CACHE_FILE)
     except OSError:
@@ -425,8 +419,7 @@ def _list_videos_win(base_dir: str) -> list[str] | None:
 
 
 def scan_local_files(include_target: bool = True, skip_probe: bool = False,
-                     on_progress: "Callable[[int], None] | None" = None,
-                     flush_cache: bool = False) -> list[dict]:
+                     on_progress: "Callable[[int], None] | None" = None) -> list[dict]:
     """扫描视频文件，返回 [{code, paths, size, res?, meta?}]
 
     Args:
@@ -434,21 +427,8 @@ def scan_local_files(include_target: bool = True, skip_probe: bool = False,
                         False=仅扫描 BASE_DIRS（scan/organize 用）
         skip_probe: True=跳过 ffprobe 探测（SCAN/ORGANIZE 用，加速返回）
         on_progress: 可选回调，每发现一个新番号时调用 on_progress(current_code_count)
-        flush_cache: True=扫描过程中增量写入缓存（仅 pre-scan 初始同步使用）
     """
     code_files: dict[str, list[tuple[int, str, int, Path]]] = {}
-    _flush_counter = 0  # 距上次刷盘新增的 code 计数
-
-    def _maybe_flush_cache():
-        """达到步长时将当前结果写入缓存（incomplete 标记）"""
-        nonlocal _flush_counter
-        if not flush_cache:
-            return
-        _flush_counter += 1
-        if _flush_counter >= _SCAN_CACHE_FLUSH_STEP:
-            _flush_counter = 0
-            partial = _build_results_from(code_files, {})
-            _save_scan_cache(partial, sync_version=0, complete=False)
 
     # 构建扫描目录列表（去重，防止子目录重叠导致重复扫描）
     dirs_to_scan = list(BASE_DIRS)
@@ -501,10 +481,8 @@ def scan_local_files(include_target: bool = True, skip_probe: bool = False,
             if is_new_code:
                 code_files[code] = []
             code_files[code].append((cd_num, rel_path, file_size, path))
-            if is_new_code:
-                if on_progress is not None:
-                    on_progress(len(code_files))
-                _maybe_flush_cache()
+            if is_new_code and on_progress is not None:
+                on_progress(len(code_files))
 
     # ffprobe 后置并发探测（skip_probe=True 时跳过，SCAN/ORGANIZE 用）
     code_meta: dict[str, dict] = {}
@@ -530,11 +508,6 @@ def scan_local_files(include_target: bool = True, skip_probe: bool = False,
                     pass
 
     results = _build_results_from(code_files, code_meta)
-
-    # 扫描完成：写入完整缓存
-    if flush_cache:
-        _save_scan_cache(results, sync_version=0, complete=True)
-
     return results
 
 
@@ -1308,12 +1281,10 @@ async def ws_session():
 
             # 尝试加载扫描缓存（跳过耗时的全量扫描）
             cache = _load_scan_cache()
-            if cache and cache.get("files"):
+            if cache:
                 cached_files = cache["files"]
                 cached_version = cache.get("sync_version", 0)
-                is_complete = cache.get("complete", False)
-                logger.info("命中扫描缓存: %d 个番号 (version=%d, complete=%s)",
-                            len(cached_files), cached_version, is_complete)
+                logger.info("命中扫描缓存: %d 个番号 (version=%d)", len(cached_files), cached_version)
 
                 # 恢复增量同步状态
                 if cached_version > 0:
@@ -1335,9 +1306,7 @@ async def ws_session():
                 )
                 await _send_sync_report(report, await_ack=True)
             else:
-                # 无缓存 → 全量扫描（带增量刷盘）
-
-                # 预扫描进度上报：线程安全计数器 + async 定时发送
+                # 无缓存 → 全量扫描
                 _pre_scan_count = 0
                 _pre_scan_done = False
 
@@ -1364,11 +1333,7 @@ async def ws_session():
                 reporter_task = asyncio.create_task(_pre_scan_reporter())
                 try:
                     my_files = await loop.run_in_executor(
-                        None, lambda: scan_local_files(
-                            include_target=False,
-                            on_progress=_on_scan_progress,
-                            flush_cache=True,
-                        ),
+                        None, lambda: _get_my_files(on_progress=_on_scan_progress),
                     )
                 finally:
                     _pre_scan_done = True
@@ -1386,6 +1351,9 @@ async def ws_session():
                     }))
                 except Exception:
                     pass
+
+                # pre-scan 完成后写缓存
+                _save_scan_cache(my_files)
 
                 logger.info("扫描完成: %d 个番号", len(my_files))
                 report = await loop.run_in_executor(None, build_sync_report)
@@ -1522,7 +1490,7 @@ async def ws_session():
                         current_files = _get_my_files()
                         _last_synced_codes = {f["code"] for f in current_files}
                         # 持久化完整缓存（下次启动跳过扫描 + 增量 diff）
-                        _save_scan_cache(current_files, sync_version=new_version, complete=True)
+                        _save_scan_cache(current_files, sync_version=new_version)
 
                 elif msg_type == "SYNC_SHARD_ACK":
                     pass  # 分片确认
