@@ -1068,33 +1068,30 @@ def _execute_move(task_id: int, params: dict, report_progress=None, target_base:
                     skipped += 1
                     continue
 
-        # EXDEV 跨文件系统降级，带重试（应对 Windows 文件锁：Defender/索引/缩略图等）
-        # 模拟资源管理器行为：多次重试 + 递增等待，给锁定程序释放句柄的时间
-        max_retries = 6
-        for attempt in range(max_retries):
+        # Windows 文件移动策略（模拟资源管理器行为）：
+        # rename() 需要 DELETE 权限，Defender/索引/缩略图等以非 FILE_SHARE_DELETE
+        # 方式打开文件时必定失败。改用 copy+delete：copy 只需 READ（几乎不会被阻塞），
+        # 文件到位后再删源文件，即使删除暂时失败，数据已安全到达目标。
+        tmp_dest = dest.with_name(dest.name + ".dmm-tmp")
+        try:
+            shutil.copy2(str(src), str(tmp_dest))
+            if tmp_dest.stat().st_size != src.stat().st_size:
+                tmp_dest.unlink(missing_ok=True)
+                raise OSError(f"Size mismatch after copy for {src.name}")
+            tmp_dest.rename(dest)
+        except Exception:
+            tmp_dest.unlink(missing_ok=True)
+            raise
+        # 删除源文件（带重试，容忍短暂锁定）
+        for attempt in range(5):
             try:
-                src.rename(dest)
+                src.unlink()
                 break
-            except OSError as e:
-                if e.errno == errno_mod.EXDEV:
-                    tmp_dest = dest.with_name(dest.name + ".dmm-tmp")
-                    try:
-                        shutil.copy2(str(src), str(tmp_dest))
-                        if tmp_dest.stat().st_size != src.stat().st_size:
-                            tmp_dest.unlink(missing_ok=True)
-                            raise OSError(f"Size mismatch after cross-fs copy for {src.name}")
-                        tmp_dest.rename(dest)
-                        src.unlink()
-                    except Exception:
-                        tmp_dest.unlink(missing_ok=True)
-                        raise
-                    break
-                elif attempt < max_retries - 1:
-                    wait = min(2 ** attempt, 10)  # 1s, 2s, 4s, 8s, 10s
-                    logger.info("文件被锁定，%ds 后重试 (%d/%d): %s", wait, attempt + 1, max_retries, src.name)
-                    time.sleep(wait)
+            except OSError:
+                if attempt < 4:
+                    time.sleep(1)
                 else:
-                    raise
+                    logger.warning("源文件删除失败（数据已到位）: %s", src.name)
         moved += 1
         if report_progress and total > 0:
             pct = min(99, int((idx + 1) / total * 100))
