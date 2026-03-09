@@ -123,6 +123,13 @@ def _load_scan_cache() -> dict | None:
             return None
         if not cache.get("files"):
             return None
+        # 快速校验：比较磁盘视频文件数与缓存时的数量
+        cached_count = cache.get("file_count")
+        if cached_count is not None:
+            actual_count = _count_video_files()
+            if actual_count != cached_count:
+                logger.info("缓存失效: 文件数量变化 (%d → %d)", cached_count, actual_count)
+                return None
         return cache
     except (OSError, _json_mod.JSONDecodeError, KeyError):
         return None
@@ -133,6 +140,7 @@ def _save_scan_cache(files: list[dict], sync_version: int = 0) -> None:
     cache = {
         "base_dirs": [os.path.normcase(os.path.abspath(d)) for d in BASE_DIRS],
         "files": files,
+        "file_count": _count_video_files(),
         "sync_version": sync_version,
         "cached_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -158,6 +166,20 @@ def _invalidate_scan_cache() -> None:
         os.unlink(_SCAN_CACHE_FILE)
     except OSError:
         pass
+
+
+def _count_video_files() -> int:
+    """快速统计 BASE_DIRS 下视频文件数量（不解析番号，不 probe）"""
+    count = 0
+    for base_dir in BASE_DIRS:
+        root = Path(base_dir)
+        if not root.is_dir():
+            continue
+        for p in root.rglob("*"):
+            if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS and p.name != SENTINEL_NAME:
+                count += 1
+    return count
+
 
 def _detect_ffprobe() -> str:
     """检测 ffprobe 路径（优先配置路径，其次系统 PATH），返回可执行路径或空串。
