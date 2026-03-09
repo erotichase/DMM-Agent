@@ -1308,10 +1308,12 @@ async def ws_session():
 
             # 尝试加载扫描缓存（跳过耗时的全量扫描）
             cache = _load_scan_cache()
-            if cache and cache.get("complete"):
+            if cache and cache.get("files"):
                 cached_files = cache["files"]
                 cached_version = cache.get("sync_version", 0)
-                logger.info("命中扫描缓存: %d 个番号 (version=%d)", len(cached_files), cached_version)
+                is_complete = cache.get("complete", False)
+                logger.info("命中扫描缓存: %d 个番号 (version=%d, complete=%s)",
+                            len(cached_files), cached_version, is_complete)
 
                 # 恢复增量同步状态
                 if cached_version > 0:
@@ -1333,9 +1335,7 @@ async def ws_session():
                 )
                 await _send_sync_report(report, await_ack=True)
             else:
-                # 无缓存或缓存不完整 → 全量扫描（带增量刷盘）
-                if cache and not cache.get("complete"):
-                    logger.info("发现不完整缓存 (%d 个番号)，继续全量扫描", len(cache.get("files", [])))
+                # 无缓存 → 全量扫描（带增量刷盘）
 
                 # 预扫描进度上报：线程安全计数器 + async 定时发送
                 _pre_scan_count = 0
