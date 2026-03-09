@@ -1018,7 +1018,7 @@ def _cleanup_empty_dirs(moves: list[dict]) -> int:
 
 
 def _execute_move(task_id: int, params: dict, report_progress: Callable[[int, str], None] | None = None, target_base: str | None = None) -> dict:
-    """执行移动任务（支持跨盘、冲突处理）"""
+    """执行移动任务（同盘 rename，BASE_DIR 与 TARGET_DIR 必须在同一磁盘）"""
     code = params.get("code", "")
     target_dir = params.get("target_dir", "")
     on_conflict = params.get("on_conflict", "skip")
@@ -1064,11 +1064,10 @@ def _execute_move(task_id: int, params: dict, report_progress: Callable[[int, st
         dest_path = dest_dir / dest_name
 
         rel_from = src_path.relative_to(base_root).as_posix()
-        # 如果跨盘，dest 相对于 actual_base；否则相对于 base_root
         try:
-            rel_to = dest_path.relative_to(base_root).as_posix()
-        except ValueError:
             rel_to = dest_path.relative_to(actual_base).as_posix()
+        except ValueError:
+            rel_to = dest_path.relative_to(base_root).as_posix()
         moves.append({"from": rel_from, "to": rel_to, "src": src_path, "dest": dest_path})
 
     # 执行移动
@@ -1169,6 +1168,7 @@ def _execute_organize(task_id: int, params: dict) -> dict:
 
     for code, meta in metadata.items():
         if code not in code_to_file:
+            # 文件不在 BASE_DIRS 中（已移到 TARGET_DIR 或被删除），跳过
             stats["skipped"] += 1
             stats["skipped_codes"].append(code)
             continue
@@ -1178,9 +1178,8 @@ def _execute_organize(task_id: int, params: dict) -> dict:
         series = sanitize_dirname(meta.get("series", ""))
         target_dir = ORGANIZE_PATTERN.format(actress=actress, code=code, series=series)
 
-        # 检查是否已在目标位置
-        # scan_local_files 返回的 paths 是相对于扫描目录的路径
-        # 如果 rel path 已经以 target_dir 为前缀，说明已整理过
+        # 当 BASE_DIR == TARGET_DIR 时，文件整理后仍在扫描范围内
+        # 通过相对路径前缀判断是否已在目标目录结构中，避免重复移动
         current_path = file_info["paths"][0] if file_info["paths"] else ""
         is_organized = current_path.startswith(target_dir + "/") or current_path == target_dir
 
@@ -1190,7 +1189,7 @@ def _execute_organize(task_id: int, params: dict) -> dict:
             continue
 
         try:
-            # target_base=None → _execute_move 使用文件所在的 base_root（同盘移动）
+            # target_base=None → _execute_move 通过 base_to_target 映射确定目标目录
             result = _execute_move(
                 task_id=-1,
                 params={"code": code, "target_dir": target_dir, "on_conflict": ORGANIZE_ON_CONFLICT},
