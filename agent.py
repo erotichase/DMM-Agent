@@ -1052,6 +1052,7 @@ def _execute_move(task_id: int, params: dict, report_progress: Callable[[int, st
     # 执行移动
     moved = 0
     skipped = 0
+    deferred_deletes: list[Path] = []  # copy+delete 后未能立即删除的源文件
     total = len(moves)
     for idx, m in enumerate(moves):
         dest: Path = m["dest"]
@@ -1108,22 +1109,32 @@ def _execute_move(task_id: int, params: dict, report_progress: Callable[[int, st
                 except Exception:
                     tmp_dest.unlink(missing_ok=True)
                     raise
-                # 删除源文件（带重试，容忍短暂锁定）
-                for attempt in range(5):
-                    try:
-                        src.unlink()
-                        break
-                    except OSError:
-                        if attempt < 4:
-                            time.sleep(1)
-                        else:
-                            logger.warning("源文件删除失败（数据已到位）: %s", src.name)
+                # 源文件删除延迟到所有移动完成后统一清理（Defender/索引器此时已释放锁）
+                deferred_deletes.append(src)
             else:
                 raise
         moved += 1
         if report_progress and total > 0:
             pct = min(99, int((idx + 1) / total * 100))
             report_progress(pct, f"Moving file {idx + 1}/{total}...")
+
+    # 统一清理 copy+delete 残留的源文件
+    if deferred_deletes:
+        time.sleep(2)  # 等待 Defender/索引器释放文件锁
+        still_locked = []
+        for src in deferred_deletes:
+            try:
+                src.unlink()
+            except OSError:
+                still_locked.append(src)
+        # 二次重试
+        if still_locked:
+            time.sleep(5)
+            for src in still_locked:
+                try:
+                    src.unlink()
+                except OSError:
+                    logger.warning("源文件删除失败（数据已到位）: %s", src.name)
 
     # 清理移动后留下的空目录（bottom-up，忽略系统垃圾文件）
     cleaned_dirs = _cleanup_empty_dirs(moves)
