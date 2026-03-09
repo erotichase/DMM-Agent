@@ -505,6 +505,7 @@ def scan_local_files(include_target: bool = True, skip_probe: bool = False,
         on_progress: 可选回调，每发现一个新番号时调用 on_progress(current_code_count)
     """
     code_files: dict[str, list[tuple[int, str, int, Path]]] = {}
+    code_dirs: dict[str, set[str]] = {}  # code → 出现在哪些 base_dir
 
     # 构建扫描目录列表（去重，防止子目录重叠导致重复扫描）
     dirs_to_scan = list(BASE_DIRS)
@@ -556,9 +557,20 @@ def scan_local_files(include_target: bool = True, skip_probe: bool = False,
             is_new_code = code not in code_files
             if is_new_code:
                 code_files[code] = []
+                code_dirs[code] = set()
             code_files[code].append((cd_num, rel_path, file_size, path))
+            code_dirs[code].add(base_dir)
             if is_new_code and on_progress is not None:
                 on_progress(len(code_files))
+
+    # 跨目录重复检测
+    duplicates = {code: dirs for code, dirs in code_dirs.items() if len(dirs) > 1}
+    if duplicates:
+        logger.warning("发现 %d 个番号在多个目录中重复存在:", len(duplicates))
+        for code, dirs in list(duplicates.items())[:20]:  # 最多显示 20 个
+            logger.warning("  %s → %s", code, ", ".join(sorted(dirs)))
+        if len(duplicates) > 20:
+            logger.warning("  ... 还有 %d 个重复", len(duplicates) - 20)
 
     # ffprobe 后置并发探测（skip_probe=True 时跳过，SCAN/ORGANIZE 用）
     code_meta: dict[str, dict] = {}
@@ -1169,7 +1181,10 @@ def _execute_scan(task_id: int, params: dict) -> dict:
 
 
 def _execute_organize(task_id: int, params: dict) -> dict:
-    """执行整理任务：使用 Cloud 下发的元数据整理文件到标准目录结构"""
+    """执行整理任务：使用 Cloud 下发的元数据整理文件到标准目录结构
+
+    每个文件就近整理到所在 BASE_DIR 内（同盘 rename，零 IO），不跨盘移动。
+    """
     metadata = params.get("metadata", {})
     if not metadata:
         return {"task_id": task_id, "status": "SUCCESS", "result": {
@@ -1177,10 +1192,6 @@ def _execute_organize(task_id: int, params: dict) -> dict:
             "organized_codes": [], "skipped_codes": [],
         }}
 
-    if not TARGET_DIRS:
-        return {"task_id": task_id, "status": "FAILED", "error": "TARGET_DIRS not configured"}
-
-    target_base = TARGET_DIRS[0]
     files = scan_local_files(include_target=False, skip_probe=True)
     # 按 code 索引文件
     code_to_file = {}
@@ -1200,11 +1211,11 @@ def _execute_organize(task_id: int, params: dict) -> dict:
         series = sanitize_dirname(meta.get("series", ""))
         target_dir = ORGANIZE_PATTERN.format(actress=actress, code=code, series=series)
 
-        # 检查是否已在目标位置
+        # 检查是否已在目标位置（任一 BASE_DIR 下）
         current_path = file_info["paths"][0] if file_info["paths"] else ""
-        expected_prefix = str(Path(target_base) / target_dir)
         is_organized = False
         for base_dir in BASE_DIRS:
+            expected_prefix = str(Path(base_dir) / target_dir)
             abs_current = str(Path(base_dir) / current_path)
             if abs_current.startswith(expected_prefix + os.sep) or abs_current.startswith(expected_prefix):
                 is_organized = True
@@ -1216,10 +1227,10 @@ def _execute_organize(task_id: int, params: dict) -> dict:
             continue
 
         try:
+            # target_base=None → _execute_move 使用文件所在的 base_root（同盘移动）
             result = _execute_move(
                 task_id=-1,
                 params={"code": code, "target_dir": target_dir, "on_conflict": ORGANIZE_ON_CONFLICT},
-                target_base=target_base,
             )
         except Exception as e:
             stats["failed"] += 1
