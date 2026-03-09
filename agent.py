@@ -1194,20 +1194,26 @@ def _execute_organize(task_id: int, params: dict) -> dict:
         target_dir = ORGANIZE_PATTERN.format(actress=actress, code=code, series=series)
 
         # 检查目标位置是否已存在相同文件（先比大小，再比 SHA1）
+        # 所有文件都已在目标位置才算 is_organized
         is_organized = False
-        rel = file_info["paths"][0] if file_info["paths"] else ""
-        for bd in BASE_DIRS:
-            src_path = Path(bd) / rel
-            if not src_path.exists():
-                continue
-            norm_base = os.path.normcase(os.path.abspath(bd))
-            target_root = Path(base_to_target.get(norm_base, bd))
-            dest_path = target_root / target_dir / f"{code}{src_path.suffix}"
-            if dest_path.exists() and dest_path.stat().st_size == src_path.stat().st_size:
-                if _file_sha1(src_path) == _file_sha1(dest_path):
-                    is_organized = True
-                    logger.debug("已整理（SHA1 匹配）: %s", code)
-            break
+        all_paths = file_info.get("paths", [])
+        if all_paths:
+            matched_count = 0
+            for rel in all_paths:
+                for bd in BASE_DIRS:
+                    src_path = Path(bd) / rel
+                    if not src_path.exists():
+                        continue
+                    norm_base = os.path.normcase(os.path.abspath(bd))
+                    target_root = Path(base_to_target.get(norm_base, bd))
+                    dest_path = target_root / target_dir / src_path.name
+                    if dest_path.exists() and dest_path.stat().st_size == src_path.stat().st_size:
+                        if _file_sha1(src_path) == _file_sha1(dest_path):
+                            matched_count += 1
+                    break  # 找到源文件所在 BASE_DIR 即可，不需要继续找
+            if matched_count == len(all_paths):
+                is_organized = True
+                logger.debug("已整理（SHA1 匹配，%d 个文件）: %s", matched_count, code)
 
         if is_organized:
             stats["skipped"] += 1
