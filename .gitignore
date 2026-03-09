@@ -7,3 +7,4 @@ venv/
 .DS_Store
 /tmp/
 dmm-agent.lock
+.scan_cache.json
