@@ -1112,13 +1112,9 @@ def _execute_move(task_id: int, params: dict, report_progress: Callable[[int, st
 
         try:
             src.rename(dest)
-        except OSError:
-            # 跨盘 rename 失败 (EXDEV)，回退到 shutil.move（copy+delete）
-            try:
-                shutil.move(str(src), str(dest))
-            except Exception as e2:
-                logger.error("移动失败 %s → %s: %s", src, dest, e2)
-                raise
+        except OSError as e:
+            logger.error("移动失败 %s → %s: %s（BASE_DIR 与 TARGET_DIR 必须在同一磁盘）", src, dest, e)
+            raise
         moved += 1
         if report_progress and total > 0:
             pct = min(99, int((idx + 1) / total * 100))
@@ -1154,7 +1150,7 @@ def _execute_scan(task_id: int, params: dict) -> dict:
 def _execute_organize(task_id: int, params: dict) -> dict:
     """执行整理任务：使用 Cloud 下发的元数据整理文件到标准目录结构
 
-    文件从 BASE_DIRS[i] 移动到 TARGET_DIRS[i]（一一对应），同盘 rename 零 IO，跨盘自动 copy+delete。
+    文件从 BASE_DIRS[i] 移动到 TARGET_DIRS[i]（一一对应，必须同盘），rename 零 IO。
     """
     metadata = params.get("metadata", {})
     if not metadata:
