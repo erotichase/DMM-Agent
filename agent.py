@@ -1146,6 +1146,15 @@ def _execute_scan(task_id: int, params: dict) -> dict:
     }
 
 
+def _file_sha1(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
+    """计算文件 SHA1 哈希值"""
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        while chunk := f.read(chunk_size):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _execute_organize(task_id: int, params: dict) -> dict:
     """执行整理任务：使用 Cloud 下发的元数据整理文件到标准目录结构
 
@@ -1159,10 +1168,16 @@ def _execute_organize(task_id: int, params: dict) -> dict:
         }}
 
     files = scan_local_files(include_target=False, skip_probe=True)
-    # 按 code 索引文件
-    code_to_file = {}
+    # 按 code 索引文件（记录源绝对路径和所属 base_dir）
+    code_to_file: dict[str, dict] = {}
     for f in files:
         code_to_file[f["code"]] = f
+
+    # 构建 BASE_DIR → TARGET_DIR 映射（一一对应）
+    base_to_target: dict[str, str] = {}
+    for i, bd in enumerate(BASE_DIRS):
+        if TARGET_DIRS and i < len(TARGET_DIRS):
+            base_to_target[os.path.normcase(os.path.abspath(bd))] = TARGET_DIRS[i]
 
     stats: dict = {"organized": 0, "skipped": 0, "failed": 0, "organized_codes": [], "skipped_codes": []}
 
@@ -1178,10 +1193,21 @@ def _execute_organize(task_id: int, params: dict) -> dict:
         series = sanitize_dirname(meta.get("series", ""))
         target_dir = ORGANIZE_PATTERN.format(actress=actress, code=code, series=series)
 
-        # 当 BASE_DIR == TARGET_DIR 时，文件整理后仍在扫描范围内
-        # 通过相对路径前缀判断是否已在目标目录结构中，避免重复移动
-        current_path = file_info["paths"][0] if file_info["paths"] else ""
-        is_organized = current_path.startswith(target_dir + "/") or current_path == target_dir
+        # 检查目标位置是否已存在相同文件（先比大小，再比 SHA1）
+        is_organized = False
+        rel = file_info["paths"][0] if file_info["paths"] else ""
+        for bd in BASE_DIRS:
+            src_path = Path(bd) / rel
+            if not src_path.exists():
+                continue
+            norm_base = os.path.normcase(os.path.abspath(bd))
+            target_root = Path(base_to_target.get(norm_base, bd))
+            dest_path = target_root / target_dir / f"{code}{src_path.suffix}"
+            if dest_path.exists() and dest_path.stat().st_size == src_path.stat().st_size:
+                if _file_sha1(src_path) == _file_sha1(dest_path):
+                    is_organized = True
+                    logger.debug("已整理（SHA1 匹配）: %s", code)
+            break
 
         if is_organized:
             stats["skipped"] += 1
