@@ -114,7 +114,13 @@ _SCAN_CACHE_FILE = os.path.join(_SCRIPT_DIR, ".scan_cache.json")
 
 
 def _load_scan_cache() -> dict | None:
-    """加载扫描缓存，返回 None 表示无缓存或缓存无效"""
+    """加载扫描缓存，返回 None 表示无缓存或缓存无效
+
+    三种结果:
+    - 文件数一致 → 直接返回缓存（最快）
+    - 文件数变化 → 增量更新：快速扫描(skip_probe) + 合并缓存元数据
+    - 无缓存/BASE_DIRS 变更 → 返回 None（全量重扫）
+    """
     try:
         with open(_SCAN_CACHE_FILE, "r", encoding="utf-8") as f:
             cache = _json_mod.load(f)
@@ -128,7 +134,13 @@ def _load_scan_cache() -> dict | None:
         if cached_count is not None:
             actual_count = _count_video_files()
             if actual_count != cached_count:
-                logger.info("缓存失效: 文件数量变化 (%d → %d)", cached_count, actual_count)
+                logger.info("文件数量变化 (%d → %d)，增量更新缓存...", cached_count, actual_count)
+                updated = _incremental_cache_update(cache["files"])
+                if updated is not None:
+                    cache["files"] = updated
+                    cache["file_count"] = actual_count
+                    cache["sync_version"] = 0  # 文件变化，需全量 SYNC
+                    return cache
                 return None
         return cache
     except (OSError, _json_mod.JSONDecodeError, KeyError):
@@ -166,6 +178,42 @@ def _invalidate_scan_cache() -> None:
         os.unlink(_SCAN_CACHE_FILE)
     except OSError:
         pass
+
+
+def _incremental_cache_update(cached_files: list[dict]) -> list[dict] | None:
+    """增量更新缓存：快速扫描 + 合并已有元数据（res/meta）
+
+    Returns: 更新后的文件列表，失败返回 None
+    """
+    try:
+        fresh_files = scan_local_files(include_target=False, skip_probe=True)
+    except Exception as e:
+        logger.warning("增量扫描失败: %s", e)
+        return None
+
+    # 构建缓存 code → 元数据 lookup（保留 ffprobe 结果）
+    cached_meta: dict[str, dict] = {}
+    for f in cached_files:
+        cached_meta[f["code"]] = {"res": f.get("res"), "meta": f.get("meta")}
+
+    added = 0
+    removed = len(cached_meta)
+    # 合并：新文件继承缓存的 res/meta
+    for f in fresh_files:
+        code = f["code"]
+        if code in cached_meta:
+            cm = cached_meta[code]
+            if cm.get("res"):
+                f["res"] = cm["res"]
+            if cm.get("meta"):
+                f["meta"] = cm["meta"]
+            removed -= 1
+        else:
+            added += 1
+
+    removed = max(0, removed)  # 缓存中有但磁盘上没有的
+    logger.info("增量更新完成: +%d 新增, -%d 移除, %d 保留", added, removed, len(fresh_files) - added)
+    return fresh_files
 
 
 def _count_video_files() -> int:
