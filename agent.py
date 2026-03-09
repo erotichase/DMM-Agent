@@ -1052,6 +1052,11 @@ def _execute_move(task_id: int, params: dict, report_progress=None, target_base:
         src: Path = m["src"]
         dest.parent.mkdir(parents=True, exist_ok=True)
 
+        # 源文件已在目标位置，无需移动
+        if src == dest or src.resolve() == dest.resolve():
+            skipped += 1
+            continue
+
         if dest.exists():
             if on_conflict == "skip":
                 skipped += 1
