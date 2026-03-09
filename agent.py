@@ -1029,6 +1029,12 @@ def _execute_move(task_id: int, params: dict, report_progress: Callable[[int, st
     if not is_path_safe(target_dir):
         return {"task_id": task_id, "status": "FAILED", "error": "Unsafe target path"}
 
+    # 构建 BASE_DIR → TARGET_DIR 映射（一一对应）
+    base_to_target: dict[str, str] = {}
+    for i, bd in enumerate(BASE_DIRS):
+        if TARGET_DIRS and i < len(TARGET_DIRS):
+            base_to_target[os.path.normcase(os.path.abspath(bd))] = TARGET_DIRS[i]
+
     # 查找源文件
     source_files = []
     for base_dir in BASE_DIRS:
@@ -1044,8 +1050,12 @@ def _execute_move(task_id: int, params: dict, report_progress: Callable[[int, st
 
     moves = []
     for src_path, base_root in source_files:
-        # 使用指定的 target_base 或源文件的 base_root
-        actual_base = Path(target_base) if target_base else base_root
+        # 优先级: 显式 target_base > BASE_DIR 对应的 TARGET_DIR > base_root 自身
+        if target_base:
+            actual_base = Path(target_base)
+        else:
+            norm_root = os.path.normcase(os.path.abspath(str(base_root)))
+            actual_base = Path(base_to_target.get(norm_root, str(base_root)))
         dest_dir = actual_base / target_dir
         if len(source_files) == 1:
             dest_name = f"{code}{src_path.suffix}"
@@ -1102,9 +1112,13 @@ def _execute_move(task_id: int, params: dict, report_progress: Callable[[int, st
 
         try:
             src.rename(dest)
-        except OSError as e:
-            logger.error("移动失败 %s → %s: %s", src, dest, e)
-            raise
+        except OSError:
+            # 跨盘 rename 失败 (EXDEV)，回退到 shutil.move（copy+delete）
+            try:
+                shutil.move(str(src), str(dest))
+            except Exception as e2:
+                logger.error("移动失败 %s → %s: %s", src, dest, e2)
+                raise
         moved += 1
         if report_progress and total > 0:
             pct = min(99, int((idx + 1) / total * 100))
@@ -1140,7 +1154,7 @@ def _execute_scan(task_id: int, params: dict) -> dict:
 def _execute_organize(task_id: int, params: dict) -> dict:
     """执行整理任务：使用 Cloud 下发的元数据整理文件到标准目录结构
 
-    每个文件就近整理到所在 BASE_DIR 内（同盘 rename，零 IO），不跨盘移动。
+    文件从 BASE_DIRS[i] 移动到 TARGET_DIRS[i]（一一对应），同盘 rename 零 IO，跨盘自动 copy+delete。
     """
     metadata = params.get("metadata", {})
     if not metadata:
@@ -1168,15 +1182,11 @@ def _execute_organize(task_id: int, params: dict) -> dict:
         series = sanitize_dirname(meta.get("series", ""))
         target_dir = ORGANIZE_PATTERN.format(actress=actress, code=code, series=series)
 
-        # 检查是否已在目标位置（任一 BASE_DIR 下）
+        # 检查是否已在目标位置
+        # scan_local_files 返回的 paths 是相对于扫描目录的路径
+        # 如果 rel path 已经以 target_dir 为前缀，说明已整理过
         current_path = file_info["paths"][0] if file_info["paths"] else ""
-        is_organized = False
-        for base_dir in BASE_DIRS:
-            expected_prefix = str(Path(base_dir) / target_dir)
-            abs_current = str(Path(base_dir) / current_path)
-            if abs_current.startswith(expected_prefix + os.sep) or abs_current.startswith(expected_prefix):
-                is_organized = True
-                break
+        is_organized = current_path.startswith(target_dir + "/") or current_path == target_dir
 
         if is_organized:
             stats["skipped"] += 1
