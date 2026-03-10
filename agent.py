@@ -629,22 +629,29 @@ def _build_results_from(code_files: dict, code_meta: dict) -> list[dict]:
 def _get_my_files(on_progress: Callable[[int], None] | None = None) -> list[dict]:
     """返回属于当前用户的文件列表（仅 BASE_DIRS）
 
-    SYNC 只上报 BASE_DIRS 中的文件。已整理到 TARGET_DIRS 的文件
-    由服务端维护，不受 SYNC 影响。
+    常规 SYNC 只上报 BASE_DIRS 中的文件。
+    ORGANIZE 后的 SYNC 通过 build_sync_report(include_target=True) 包含 TARGET_DIRS。
     """
     return scan_local_files(include_target=False, on_progress=on_progress)
 
 
-def build_sync_report(incremental: bool = True, prefetched_files: list[dict] | None = None) -> dict | list[dict]:
+def build_sync_report(incremental: bool = True, prefetched_files: list[dict] | None = None,
+                      include_target: bool = False) -> dict | list[dict]:
     """构建同步报告（增量 diff 或全量分片）
 
     Args:
         incremental: True=尝试增量 diff，False=强制全量
-        prefetched_files: 预先获取的文件列表（跳过 _get_my_files 扫描）
+        prefetched_files: 预先获取的文件列表（跳过扫描）
+        include_target: True=同时扫描 TARGET_DIRS（ORGANIZE 后需要更新路径）
     """
     global _last_synced_codes
 
-    files = prefetched_files if prefetched_files is not None else _get_my_files()
+    if prefetched_files is not None:
+        files = prefetched_files
+    elif include_target:
+        files = scan_local_files(include_target=True, skip_probe=True)
+    else:
+        files = _get_my_files()
     current_codes = {f["code"] for f in files}
 
     # 目录指纹
@@ -1549,7 +1556,7 @@ async def ws_session():
                     if organized_codes:
                         _my_organized_codes.update(organized_codes)
                         report = await loop.run_in_executor(
-                            None, lambda: build_sync_report(incremental=False)
+                            None, lambda: build_sync_report(incremental=False, include_target=True)
                         )
                         await _send_sync_report(report)
 
