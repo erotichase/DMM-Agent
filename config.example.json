@@ -2,5 +2,7 @@
   "DEVICE_TOKEN": "",
   "BASE_DIRS": ["F:/JAVTMP"],
   "TARGET_DIRS": ["F:/JAV"],
-  "FFPROBE_PATH": "F:/JAVTool/ffprobe.exe"
+  "FFPROBE_PATH": "F:/JAVTool/ffprobe.exe",
+  "LAN_IP": "",
+  "FILE_SERVER_PORT": 9090
 }
