@@ -906,7 +906,14 @@ def execute_task(payload: dict, progress_q: queue.Queue | None = None) -> dict:
         }
 
 # 系统/工具产生的垃圾文件，清理目录时视为不存在
-_JUNK_FILES = {".DS_Store", ".ds_store", "Thumbs.db", "thumbs.db", "desktop.ini", ".Spotlight-V100", ".fseventsd"}
+_JUNK_FILES = {".DS_Store", ".ds_store", "Thumbs.db", "thumbs.db", "desktop.ini"}
+# 系统/工具产生的垃圾目录
+_JUNK_DIRS = {
+    ".Spotlight-V100", ".fseventsd", ".TemporaryItems", ".Trashes", ".AppleDouble",  # macOS
+    "$RECYCLE.BIN", "System Volume Information",                                      # Windows
+    "@eaDir", "#recycle",                                                             # Synology / QNAP
+    "__MACOSX",                                                                       # ZIP 解压残留
+}
 
 
 def _cleanup_empty_dirs(moves: list[dict]) -> int:
@@ -982,30 +989,36 @@ def _cleanup_empty_dirs(moves: list[dict]) -> int:
             except OSError:
                 break
 
-            # 判断目录是否"有效为空"（只包含垃圾文件或空子目录）
+            # 判断目录是否"有效为空"（只包含垃圾文件/垃圾目录或已删除的子目录）
             has_real_content = False
-            junk_to_remove: list[Path] = []
+            junk_files_to_remove: list[Path] = []
+            junk_dirs_to_remove: list[Path] = []
 
             for child in children:
                 if child.is_file() or child.is_symlink():
                     if child.name in _JUNK_FILES:
-                        junk_to_remove.append(child)
+                        junk_files_to_remove.append(child)
                     else:
                         has_real_content = True
                         break
                 elif child.is_dir():
                     if str(child) in deleted_dirs:
                         continue  # 已删除的子目录，忽略
-                    has_real_content = True
-                    break
+                    if child.name in _JUNK_DIRS:
+                        junk_dirs_to_remove.append(child)
+                    else:
+                        has_real_content = True
+                        break
 
             if has_real_content:
                 break  # 目录有实际内容，停止向上
 
-            # 先删垃圾文件，再删目录
+            # 先删垃圾文件和垃圾目录，再删当前目录
             try:
-                for junk in junk_to_remove:
+                for junk in junk_files_to_remove:
                     junk.unlink(missing_ok=True)
+                for junk in junk_dirs_to_remove:
+                    shutil.rmtree(junk, ignore_errors=True)
                 current.rmdir()
                 deleted_dirs.add(dir_str)
                 cleaned += 1
