@@ -1747,6 +1747,15 @@ class _FileStreamHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
 
+        # 健康检查端点（用于本机检测）
+        if path == "/ping":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self._cors_headers()
+            self.end_headers()
+            self.wfile.write(b"pong")
+            return
+
         # 路由: /stream/<relative_path>
         if not path.startswith("/stream/"):
             self.send_error(404, "Not Found")
