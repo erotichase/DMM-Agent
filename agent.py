@@ -45,6 +45,7 @@ DEVICE_TOKEN = _config.get("DEVICE_TOKEN", "")
 BASE_DIRS = _config.get("BASE_DIRS", [])
 TARGET_DIRS = _config.get("TARGET_DIRS", [])
 FFPROBE_PATH = _config.get("FFPROBE_PATH", "")
+LAN_IP = _config.get("LAN_IP", "")  # 手动指定局域网 IP（留空则自动检测）
 
 # 通用配置
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".wmv"}  # 支持的视频文件扩展名
@@ -102,7 +103,9 @@ class TokenInvalidError(Exception):
 
 
 def _get_lan_ip() -> str:
-    """获取本机局域网 IP"""
+    """获取本机局域网 IP，优先使用 config.json 中的 LAN_IP 配置"""
+    if LAN_IP:
+        return LAN_IP
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -2094,6 +2097,8 @@ def main():
         logger.warning("配置: 内置默认（未找到 config.json，请参考 config.example.json 创建）")
     logger.info("云端: %s", CLOUD_WS_URL)
     logger.info("扫描: %s", ", ".join(BASE_DIRS) if BASE_DIRS else "(未配置)")
+    logger.info("LAN IP: %s%s", _get_lan_ip(), " (手动配置)" if LAN_IP else " (自动检测)")
+    logger.info("文件服务: http://%s:%d", _get_lan_ip(), FILE_SERVER_PORT)
     if _HAS_FFPROBE:
         logger.info("ffprobe: ✓ (%s)", _FFPROBE_CMD)
     else:
