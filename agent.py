@@ -49,6 +49,7 @@ FFPROBE_PATH = _config.get("FFPROBE_PATH", "")
 # 通用配置
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".wmv"}  # 支持的视频文件扩展名
 HEARTBEAT_INTERVAL = 30  # 心跳间隔（秒）
+FILE_SERVER_PORT = _config.get("FILE_SERVER_PORT", 9090)  # LAN 文件服务端口
 
 # 自动整理配置
 ORGANIZE_PATTERN = "{actress}/{code}"  # 整理目录模板，可用变量: {actress} 女优名, {code} 番号, {series} 系列名
@@ -73,8 +74,11 @@ import time
 import unicodedata
 import uuid
 
+import threading
 from collections.abc import Callable
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 logging.basicConfig(
     level=logging.INFO,
@@ -95,6 +99,19 @@ _PERMANENT_AUTH_REASONS = {"invalid_token", "token_revoked", "device_deleted"}  
 
 class TokenInvalidError(Exception):
     """设备令牌永久失效异常（需重新绑定设备）"""
+
+
+def _get_lan_ip() -> str:
+    """获取本机局域网 IP"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
 
 # 番号提取正则
 CODE_PATTERN = re.compile(r"^([A-Za-z]{2,10})-?(\d{2,6})")  # 匹配番号主体
@@ -749,6 +766,8 @@ def build_auth_payload() -> dict:
             "arch": platform.machine(),
             "python_version": platform.python_version(),
             "version": VERSION,
+            "lan_ip": _get_lan_ip(),
+            "file_server_port": FILE_SERVER_PORT,
         },
     }
 
@@ -1688,6 +1707,134 @@ async def ws_session():
         _ws_connection = None
 
 
+# ═══════════════════════════════════════════════════════════════
+# LAN 文件服务器（局域网视频串流）
+# ═══════════════════════════════════════════════════════════════
+
+_MIME_MAP = {
+    ".mp4": "video/mp4",
+    ".mkv": "video/x-matroska",
+    ".avi": "video/x-msvideo",
+    ".mov": "video/quicktime",
+    ".wmv": "video/x-ms-wmv",
+}
+
+
+def _resolve_file_path(rel_path: str) -> str | None:
+    """在 BASE_DIRS + TARGET_DIRS 中查找文件，返回绝对路径或 None"""
+    for base in list(BASE_DIRS) + list(TARGET_DIRS):
+        candidate = os.path.join(base, rel_path)
+        if os.path.isfile(candidate):
+            return candidate
+    # 绝对路径 fallback
+    if os.path.isabs(rel_path) and os.path.isfile(rel_path):
+        return rel_path
+    return None
+
+
+class _FileStreamHandler(BaseHTTPRequestHandler):
+    """支持 Range 请求的视频文件 HTTP handler"""
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self._cors_headers()
+        self.end_headers()
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        path = unquote(parsed.path)
+
+        # 路由: /stream/<relative_path>
+        if not path.startswith("/stream/"):
+            self.send_error(404, "Not Found")
+            return
+
+        rel_path = path[len("/stream/"):]
+        if not rel_path:
+            self.send_error(400, "Missing file path")
+            return
+
+        # 安全检查：禁止路径穿越
+        if ".." in rel_path or rel_path.startswith("/"):
+            self.send_error(403, "Forbidden")
+            return
+
+        abs_path = _resolve_file_path(rel_path)
+        if abs_path is None:
+            self.send_error(404, "File not found")
+            return
+
+        file_size = os.path.getsize(abs_path)
+        ext = os.path.splitext(abs_path)[1].lower()
+        mime_type = _MIME_MAP.get(ext, "application/octet-stream")
+
+        range_header = self.headers.get("Range")
+        if range_header:
+            # 解析 Range: bytes=start-end
+            try:
+                byte_range = range_header.replace("bytes=", "").split("-")
+                start = int(byte_range[0]) if byte_range[0] else 0
+                end = int(byte_range[1]) if byte_range[1] else file_size - 1
+            except (ValueError, IndexError):
+                self.send_error(416, "Invalid range")
+                return
+
+            if start >= file_size or end >= file_size or start > end:
+                self.send_error(416, "Range Not Satisfiable")
+                return
+
+            length = end - start + 1
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+            self.send_header("Content-Length", str(length))
+        else:
+            start = 0
+            length = file_size
+            self.send_response(200)
+            self.send_header("Content-Length", str(file_size))
+
+        self.send_header("Content-Type", mime_type)
+        self.send_header("Accept-Ranges", "bytes")
+        self._cors_headers()
+        self.end_headers()
+
+        # 分块发送
+        chunk_size = 64 * 1024  # 64KB
+        try:
+            with open(abs_path, "rb") as f:
+                f.seek(start)
+                remaining = length
+                while remaining > 0:
+                    to_read = min(chunk_size, remaining)
+                    chunk = f.read(to_read)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # 客户端断开连接
+
+    def _cors_headers(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Range")
+        self.send_header("Access-Control-Expose-Headers", "Content-Range, Content-Length, Accept-Ranges")
+
+    def log_message(self, format, *args):
+        logger.debug("FileServer: %s", format % args)
+
+
+def _start_file_server():
+    """在后台线程启动 HTTP 文件服务器"""
+    try:
+        server = HTTPServer(("0.0.0.0", FILE_SERVER_PORT), _FileStreamHandler)
+        server.daemon_threads = True
+        logger.info("文件服务器已启动: http://0.0.0.0:%d", FILE_SERVER_PORT)
+        server.serve_forever()
+    except OSError as e:
+        logger.error("文件服务器启动失败 (端口 %d): %s", FILE_SERVER_PORT, e)
+
+
 async def run_forever():
     """主循环（连接→断线重连→指数退避）"""
 
@@ -1708,6 +1855,10 @@ async def run_forever():
     else:
         # Windows: signal.signal fallback（在主线程中 Ctrl+C 触发 KeyboardInterrupt）
         signal.signal(signal.SIGINT, lambda *_: _async_signal_handler())
+
+    # 启动 LAN 文件服务器
+    file_server_thread = threading.Thread(target=_start_file_server, daemon=True)
+    file_server_thread.start()
 
     while True:
         try:
