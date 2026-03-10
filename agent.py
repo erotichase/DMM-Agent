@@ -627,12 +627,12 @@ def _build_results_from(code_files: dict, code_meta: dict) -> list[dict]:
 
 
 def _get_my_files(on_progress: Callable[[int], None] | None = None) -> list[dict]:
-    """返回属于当前用户的文件列表
+    """返回属于当前用户的文件列表（仅 BASE_DIRS）
 
-    始终扫描 BASE_DIRS + TARGET_DIRS，确保已整理到 TARGET_DIRS 的文件
-    在 Agent 重连后不会从服务端被删除。
+    SYNC 只上报 BASE_DIRS 中的文件。已整理到 TARGET_DIRS 的文件
+    由服务端维护，不受 SYNC 影响。
     """
-    return scan_local_files(include_target=True, on_progress=on_progress)
+    return scan_local_files(include_target=False, on_progress=on_progress)
 
 
 def build_sync_report(incremental: bool = True, prefetched_files: list[dict] | None = None) -> dict | list[dict]:
