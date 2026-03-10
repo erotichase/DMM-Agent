@@ -1552,8 +1552,9 @@ async def ws_session():
                 elif status == "FAILED":
                     logger.warning("任务失败: #%s - %s", task_id, result.get("error", ""))
 
-                # ORGANIZE 成功 → 记录已整理的 code + 发送全量 SYNC 更新路径
+                # ORGANIZE 成功 → 失效缓存 + 记录已整理的 code + 发送全量 SYNC 更新路径
                 if action == "ORGANIZE" and status == "SUCCESS":
+                    _invalidate_scan_cache()
                     organized_codes = result.get("result", {}).get("organized_codes", [])
                     if organized_codes:
                         _my_organized_codes.update(organized_codes)
