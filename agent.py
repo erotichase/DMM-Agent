@@ -629,20 +629,10 @@ def _build_results_from(code_files: dict, code_meta: dict) -> list[dict]:
 def _get_my_files(on_progress: Callable[[int], None] | None = None) -> list[dict]:
     """返回属于当前用户的文件列表
 
-    BASE_DIRS 文件 + 本会话 ORGANIZE 过的文件（从 TARGET_DIRS 捞回）。
-    初始 SYNC 只上报 BASE_DIRS，ORGANIZE 后按需补报。
+    始终扫描 BASE_DIRS + TARGET_DIRS，确保已整理到 TARGET_DIRS 的文件
+    在 Agent 重连后不会从服务端被删除。
     """
-    base_files = scan_local_files(include_target=False, on_progress=on_progress)
-    if not _my_organized_codes:
-        return base_files
-
-    all_files = scan_local_files(include_target=True)
-    base_codes = {f["code"] for f in base_files}
-    code_to_file = {f["code"]: f for f in base_files}
-    for f in all_files:
-        if f["code"] in _my_organized_codes and f["code"] not in base_codes:
-            code_to_file[f["code"]] = f
-    return list(code_to_file.values())
+    return scan_local_files(include_target=True, on_progress=on_progress)
 
 
 def build_sync_report(incremental: bool = True, prefetched_files: list[dict] | None = None) -> dict | list[dict]:
