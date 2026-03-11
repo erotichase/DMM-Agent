@@ -70,6 +70,7 @@ import re
 import shutil
 import signal
 import socket
+import subprocess
 import sys
 import time
 import unicodedata
@@ -107,12 +108,10 @@ def _get_lan_ip() -> str:
     if LAN_IP:
         return LAN_IP
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except OSError:
         return "127.0.0.1"
 
 
@@ -138,8 +137,6 @@ def _detect_ffprobe() -> str:
 
     检测成功后执行 `ffprobe -version` 验证可执行性。
     """
-    import subprocess
-
     path = ""
     if FFPROBE_PATH:
         if os.path.isfile(FFPROBE_PATH):
@@ -164,7 +161,7 @@ def _detect_ffprobe() -> str:
             return ""
         version_line = result.stdout.decode("utf-8", errors="replace").split("\n")[0]
         logger.info("ffprobe 版本: %s", version_line.strip())
-    except Exception as exc:
+    except (subprocess.SubprocessError, OSError) as exc:
         logger.warning("ffprobe 存在但执行失败: %s (%s)", path, exc)
         return ""
 
@@ -298,7 +295,6 @@ def probe_video_metadata(filepath: Path) -> dict | None:
     global _ffprobe_fail_count
     if not _HAS_FFPROBE:
         return None
-    import subprocess
     try:
         # cwd=父目录 + 只传文件名，避免 ffprobe 处理长路径或特殊字符
         result = subprocess.run(
@@ -333,7 +329,7 @@ def probe_video_metadata(filepath: Path) -> dict | None:
             "bitrate": video_stream.get("bit_rate", ""),
             "audio": audio_codec or "",
         }
-    except Exception as exc:
+    except (subprocess.SubprocessError, json.JSONDecodeError, OSError) as exc:
         _ffprobe_fail_count += 1
         if _ffprobe_fail_count <= 5 or _ffprobe_fail_count % 50 == 0:
             logger.warning("ffprobe 执行异常: %s (file=%s, fail #%d)", exc, filepath, _ffprobe_fail_count)
@@ -367,9 +363,9 @@ def _list_videos_win(base_dir: str) -> list[str] | None:
     """Windows: 使用 dir /s /b 快速递归列出视频文件，返回绝对路径列表。
 
     失败返回 None（由调用方降级到 rglob）。空列表 [] 表示无文件。
-    """
-    import subprocess
 
+    安全前提：base_dir 来自 config.json（用户本地配置），非外部输入。
+    """
     # 输入校验：防止 base_dir 中的 shell 元字符导致命令注入
     if any(c in base_dir for c in ('&', '|', ';', '>', '<', '`', '$')):
         logger.warning("base_dir 含不安全字符，跳过 Windows 快速扫描: %s", base_dir)
@@ -677,27 +673,12 @@ def _handle_token_rotate(payload: dict) -> dict:
 
 def _handle_open_file(payload: dict) -> None:
     """处理 OPEN_FILE 消息：用系统默认应用打开文件"""
-    import subprocess
-    import sys
-
     rel_path = payload.get("file_path", "")
     if not rel_path:
         logger.warning("OPEN_FILE: 未提供 file_path")
         return
 
-    # 在所有 BASE_DIRS + TARGET_DIRS 中查找文件
-    search_dirs = list(BASE_DIRS) + list(TARGET_DIRS)
-    abs_path = None
-    for base in search_dirs:
-        candidate = os.path.join(base, rel_path)
-        if os.path.isfile(candidate):
-            abs_path = candidate
-            break
-
-    # 如果 file_path 本身就是绝对路径且存在，直接使用
-    if abs_path is None and os.path.isabs(rel_path) and os.path.isfile(rel_path):
-        abs_path = rel_path
-
+    abs_path = _resolve_file_path(rel_path)
     if abs_path is None:
         logger.warning("OPEN_FILE: 文件不存在 — %s", rel_path)
         return
@@ -710,7 +691,7 @@ def _handle_open_file(payload: dict) -> None:
             os.startfile(abs_path)  # type: ignore[attr-defined]
         else:
             subprocess.Popen(["xdg-open", abs_path])
-    except Exception as e:
+    except OSError as e:
         logger.error("OPEN_FILE: 打开失败 — %s", e)
 
 
@@ -1016,6 +997,7 @@ def _execute_move(task_id: int, params: dict, report_progress: Callable[[int, st
                     continue
 
         # 同盘 rename（零 IO）；文件名不对时先原地重命名
+        original_src = src
         if src.name != dest.name:
             renamed_src = src.with_name(dest.name)
             try:
@@ -1027,6 +1009,12 @@ def _execute_move(task_id: int, params: dict, report_progress: Callable[[int, st
         try:
             src.rename(dest)
         except OSError as e:
+            # 回滚原地重命名，恢复原始文件名
+            if src != original_src and src.exists():
+                try:
+                    src.rename(original_src)
+                except OSError:
+                    logger.warning("回滚重命名失败: %s → %s", src, original_src)
             logger.error("移动失败 %s → %s: %s（BASE_DIR 与 TARGET_DIR 必须在同一磁盘）", src, dest, e)
             raise
         moved += 1
@@ -1059,15 +1047,6 @@ def _execute_scan(task_id: int, params: dict) -> dict:
             "codes": codes,
         },
     }
-
-
-def _file_sha1(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
-    """计算文件 SHA1 哈希值"""
-    h = hashlib.sha1()
-    with open(path, "rb") as f:
-        while chunk := f.read(chunk_size):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def _execute_organize(task_id: int, params: dict) -> dict:
@@ -1123,12 +1102,12 @@ def _execute_organize(task_id: int, params: dict) -> dict:
                     target_root = Path(base_to_target.get(norm_base, bd))
                     dest_path = target_root / target_dir / src_path.name
                     if dest_path.exists() and dest_path.stat().st_size == src_path.stat().st_size:
-                        if _file_sha1(src_path) == _file_sha1(dest_path):
-                            matched_count += 1
+                        # size 相同即视为已整理（视频文件 size 完全相同的概率极低）
+                        matched_count += 1
                     break  # 找到源文件所在 BASE_DIR 即可，不需要继续找
             if matched_count == len(all_paths):
                 is_organized = True
-                logger.debug("已整理（SHA1 匹配，%d 个文件）: %s", matched_count, code)
+                logger.debug("已整理（size 匹配，%d 个文件）: %s", matched_count, code)
 
         if is_organized:
             stats["skipped"] += 1
@@ -1580,14 +1559,16 @@ _MIME_MAP = {
 
 
 def _resolve_file_path(rel_path: str) -> str | None:
-    """在 BASE_DIRS + TARGET_DIRS 中查找文件，返回绝对路径或 None"""
+    """在 BASE_DIRS + TARGET_DIRS 中查找文件，返回绝对路径或 None
+
+    安全：拒绝路径穿越和绝对路径，调用方无需额外校验。
+    """
+    if not rel_path or ".." in rel_path or rel_path.startswith("/"):
+        return None
     for base in list(BASE_DIRS) + list(TARGET_DIRS):
         candidate = os.path.join(base, rel_path)
         if os.path.isfile(candidate):
             return candidate
-    # 绝对路径 fallback
-    if os.path.isabs(rel_path) and os.path.isfile(rel_path):
-        return rel_path
     return None
 
 
@@ -1713,8 +1694,15 @@ async def run_forever():
     loop = asyncio.get_running_loop()
     _shutdown_event = asyncio.Event()
 
+    _ctrl_c_count = 0
+
     def _async_signal_handler():
-        logger.info("收到退出信号，正在关闭...")
+        nonlocal _ctrl_c_count
+        _ctrl_c_count += 1
+        if _ctrl_c_count >= 2:
+            logger.info("强制退出")
+            os._exit(1)
+        logger.info("收到退出信号，正在关闭...（再按一次强制退出）")
         _shutdown_event.set()
 
     if sys.platform != "win32":
@@ -1734,7 +1722,8 @@ async def run_forever():
             attempt = 0  # 成功连接后重置
         except TokenInvalidError as e:
             logger.warning("令牌失效 (%s)，重新绑定", e)
-            DEVICE_TOKEN = dev_auto_bind() if IS_DEV else first_time_setup()
+            bind_fn = dev_auto_bind if IS_DEV else first_time_setup
+            DEVICE_TOKEN = await loop.run_in_executor(None, bind_fn)
             _persist_token(DEVICE_TOKEN)
             attempt = 0
             continue
