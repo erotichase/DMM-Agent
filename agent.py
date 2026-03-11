@@ -1424,6 +1424,13 @@ async def ws_session():
                 elif status == "FAILED":
                     logger.warning("任务失败: #%s - %s", task_id, result.get("error", ""))
 
+                # SCAN 成功 → 发送全量 SYNC 更新 user_files（含 ffprobe 分辨率）
+                if action == "SCAN" and status == "SUCCESS":
+                    report = await loop.run_in_executor(
+                        None, lambda: build_sync_report(incremental=False)
+                    )
+                    await _send_sync_report(report)
+
                 # ORGANIZE 成功 → 记录已整理的 code + 发送全量 SYNC 更新路径
                 if action == "ORGANIZE" and status == "SUCCESS":
                     organized_codes = result.get("result", {}).get("organized_codes", [])
