@@ -160,16 +160,6 @@ F:/JAV/桜空もも/JUR-582/JUR-582.mp4
 
 > 需要后端 `DEBUG=true`，生产环境 dev 端点返回 403。
 
-## 扫描缓存
-
-Agent 启动时需要扫描 `BASE_DIRS` 下所有视频文件，文件多时可能耗时数分钟。为避免每次重启都全量重扫，Agent 会将扫描结果缓存到 `.scan_cache.json`：
-
-- **Pre-scan 完成**后写入缓存，SYNC_ACK 回来后补写 `sync_version`
-- **下次启动**命中缓存时直接恢复，跳过全量扫描（秒级启动）
-- **自动失效**：`BASE_DIRS` 配置变更、Cloud 端 SYNC_REJECT 时缓存自动清除
-
-> `.scan_cache.json` 是自动生成的，无需手动编辑。如遇同步异常可删除此文件强制重扫。
-
 ## 常见问题
 
 ### 连接失败

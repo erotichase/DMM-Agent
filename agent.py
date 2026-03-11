@@ -131,123 +131,6 @@ _my_organized_codes: set[str] = set()  # 本会话 ORGANIZE 过的番号
 # 扫描缓存（跨会话持久化，避免重启时全量重扫）
 # ═══════════════════════════════════════════════════════════════
 
-_SCAN_CACHE_FILE = os.path.join(_SCRIPT_DIR, ".scan_cache.json")
-
-
-def _load_scan_cache() -> dict | None:
-    """加载扫描缓存，返回 None 表示无缓存或缓存无效
-
-    三种结果:
-    - 文件数一致 → 直接返回缓存（最快）
-    - 文件数变化 → 增量更新：快速扫描(skip_probe) + 合并缓存元数据
-    - 无缓存/BASE_DIRS 变更 → 返回 None（全量重扫）
-    """
-    try:
-        with open(_SCAN_CACHE_FILE, "r", encoding="utf-8") as f:
-            cache = _json_mod.load(f)
-        if cache.get("base_dirs") != [os.path.normcase(os.path.abspath(d)) for d in BASE_DIRS]:
-            logger.info("缓存失效: BASE_DIRS 已变更")
-            return None
-        if not cache.get("files"):
-            return None
-        # 快速校验：比较磁盘视频文件数与缓存时的数量
-        cached_count = cache.get("file_count")
-        if cached_count is not None:
-            actual_count = _count_video_files()
-            if actual_count != cached_count:
-                logger.info("文件数量变化 (%d → %d)，增量更新缓存...", cached_count, actual_count)
-                updated = _incremental_cache_update(cache["files"])
-                if updated is not None:
-                    cache["files"] = updated
-                    cache["file_count"] = actual_count
-                    cache["sync_version"] = 0  # 文件变化，需全量 SYNC
-                    return cache
-                return None
-        return cache
-    except (OSError, _json_mod.JSONDecodeError, KeyError):
-        return None
-
-
-def _save_scan_cache(files: list[dict], sync_version: int = 0) -> None:
-    """保存扫描缓存到磁盘（仅在 pre-scan 完成或 SYNC_ACK 时调用）"""
-    cache = {
-        "base_dirs": [os.path.normcase(os.path.abspath(d)) for d in BASE_DIRS],
-        "files": files,
-        "file_count": _count_video_files(),
-        "sync_version": sync_version,
-        "cached_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
-    tmp = _SCAN_CACHE_FILE + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            _json_mod.dump(cache, f, ensure_ascii=False)
-        if sys.platform == "win32":
-            os.replace(tmp, _SCAN_CACHE_FILE)
-        else:
-            os.rename(tmp, _SCAN_CACHE_FILE)
-    except OSError as e:
-        logger.debug("缓存写入失败: %s", e)
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-
-
-def _invalidate_scan_cache() -> None:
-    """删除扫描缓存"""
-    try:
-        os.unlink(_SCAN_CACHE_FILE)
-    except OSError:
-        pass
-
-
-def _incremental_cache_update(cached_files: list[dict]) -> list[dict] | None:
-    """增量更新缓存：快速扫描 + 合并已有元数据（res/meta）
-
-    Returns: 更新后的文件列表，失败返回 None
-    """
-    try:
-        fresh_files = scan_local_files(include_target=False, skip_probe=True)
-    except Exception as e:
-        logger.warning("增量扫描失败: %s", e)
-        return None
-
-    # 构建缓存 code → 元数据 lookup（保留 ffprobe 结果）
-    cached_meta: dict[str, dict] = {}
-    for f in cached_files:
-        cached_meta[f["code"]] = {"res": f.get("res"), "meta": f.get("meta")}
-
-    added = 0
-    removed = len(cached_meta)
-    # 合并：新文件继承缓存的 res/meta
-    for f in fresh_files:
-        code = f["code"]
-        if code in cached_meta:
-            cm = cached_meta[code]
-            if cm.get("res"):
-                f["res"] = cm["res"]
-            if cm.get("meta"):
-                f["meta"] = cm["meta"]
-            removed -= 1
-        else:
-            added += 1
-
-    removed = max(0, removed)  # 缓存中有但磁盘上没有的
-    logger.info("增量更新完成: +%d 新增, -%d 移除, %d 保留", added, removed, len(fresh_files) - added)
-    return fresh_files
-
-
-def _count_video_files() -> int:
-    """快速统计 BASE_DIRS 下视频文件数量（不解析番号，不 probe）"""
-    count = 0
-    for base_dir in BASE_DIRS:
-        root = Path(base_dir)
-        if not root.is_dir():
-            continue
-        for p in root.rglob("*"):
-            if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS and p.name != SENTINEL_NAME:
-                count += 1
-    return count
 
 
 def _detect_ffprobe() -> str:
@@ -1428,85 +1311,55 @@ async def ws_session():
         if BASE_DIRS:
             loop = asyncio.get_running_loop()
 
-            # 尝试加载扫描缓存（跳过耗时的全量扫描）
-            cache = _load_scan_cache()
-            if cache:
-                cached_files = cache["files"]
-                cached_version = cache.get("sync_version", 0)
-                logger.info("命中扫描缓存: %d 个番号 (version=%d)", len(cached_files), cached_version)
+            # 全量扫描（含 ffprobe 探测）
+            _pre_scan_count = 0
+            _pre_scan_done = False
 
-                # 恢复增量同步状态
-                if cached_version > 0:
-                    _last_sync_version = cached_version
-                    _last_synced_codes = {f["code"] for f in cached_files}
+            def _on_scan_progress(count: int):
+                nonlocal _pre_scan_count
+                _pre_scan_count = count
 
-                # 发送完成进度
-                try:
-                    await ws.send(json.dumps({
-                        "type": "PRE_SCAN_STATUS",
-                        "payload": {"scanned": len(cached_files), "total": len(cached_files)},
-                    }))
-                except Exception:
-                    pass
+            async def _pre_scan_reporter():
+                """每 2 秒发送一次 PRE_SCAN_STATUS"""
+                last_sent = 0
+                while not _pre_scan_done:
+                    await asyncio.sleep(2)
+                    current = _pre_scan_count
+                    if current != last_sent:
+                        try:
+                            await ws.send(json.dumps({
+                                "type": "PRE_SCAN_STATUS",
+                                "payload": {"scanned": current, "total": 0},
+                            }))
+                        except Exception:
+                            break
+                        last_sent = current
 
-                logger.info("扫描完成: %d 个番号 (cached)", len(cached_files))
-                report = await loop.run_in_executor(
-                    None, lambda: build_sync_report(prefetched_files=cached_files),
+            reporter_task = asyncio.create_task(_pre_scan_reporter())
+            try:
+                my_files = await loop.run_in_executor(
+                    None, lambda: _get_my_files(on_progress=_on_scan_progress),
                 )
-                await _send_sync_report(report, await_ack=True)
-            else:
-                # 无缓存 → 全量扫描
-                _pre_scan_count = 0
-                _pre_scan_done = False
-
-                def _on_scan_progress(count: int):
-                    nonlocal _pre_scan_count
-                    _pre_scan_count = count
-
-                async def _pre_scan_reporter():
-                    """每 2 秒发送一次 PRE_SCAN_STATUS"""
-                    last_sent = 0
-                    while not _pre_scan_done:
-                        await asyncio.sleep(2)
-                        current = _pre_scan_count
-                        if current != last_sent:
-                            try:
-                                await ws.send(json.dumps({
-                                    "type": "PRE_SCAN_STATUS",
-                                    "payload": {"scanned": current, "total": 0},
-                                }))
-                            except Exception:
-                                break
-                            last_sent = current
-
-                reporter_task = asyncio.create_task(_pre_scan_reporter())
+            finally:
+                _pre_scan_done = True
+                reporter_task.cancel()
                 try:
-                    my_files = await loop.run_in_executor(
-                        None, lambda: _get_my_files(on_progress=_on_scan_progress),
-                    )
-                finally:
-                    _pre_scan_done = True
-                    reporter_task.cancel()
-                    try:
-                        await reporter_task
-                    except asyncio.CancelledError:
-                        pass
-
-                # 发送最终进度
-                try:
-                    await ws.send(json.dumps({
-                        "type": "PRE_SCAN_STATUS",
-                        "payload": {"scanned": len(my_files), "total": len(my_files)},
-                    }))
-                except Exception:
+                    await reporter_task
+                except asyncio.CancelledError:
                     pass
 
-                # pre-scan 完成后写缓存
-                _save_scan_cache(my_files)
+            # 发送最终进度
+            try:
+                await ws.send(json.dumps({
+                    "type": "PRE_SCAN_STATUS",
+                    "payload": {"scanned": len(my_files), "total": len(my_files)},
+                }))
+            except Exception:
+                pass
 
-                logger.info("扫描完成: %d 个番号", len(my_files))
-                report = await loop.run_in_executor(None, lambda: build_sync_report(prefetched_files=my_files))
-                await _send_sync_report(report, await_ack=True)
+            logger.info("扫描完成: %d 个番号", len(my_files))
+            report = await loop.run_in_executor(None, lambda: build_sync_report(prefetched_files=my_files))
+            await _send_sync_report(report, await_ack=True)
 
         # Phase 3: 心跳 + 任务队列 + 消息循环
         task_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
@@ -1571,9 +1424,8 @@ async def ws_session():
                 elif status == "FAILED":
                     logger.warning("任务失败: #%s - %s", task_id, result.get("error", ""))
 
-                # ORGANIZE 成功 → 失效缓存 + 记录已整理的 code + 发送全量 SYNC 更新路径
+                # ORGANIZE 成功 → 记录已整理的 code + 发送全量 SYNC 更新路径
                 if action == "ORGANIZE" and status == "SUCCESS":
-                    _invalidate_scan_cache()
                     organized_codes = result.get("result", {}).get("organized_codes", [])
                     if organized_codes:
                         _my_organized_codes.update(organized_codes)
@@ -1654,8 +1506,6 @@ async def ws_session():
                         loop = asyncio.get_running_loop()
                         current_files = await loop.run_in_executor(None, _get_my_files)
                         _last_synced_codes = {f["code"] for f in current_files}
-                        # 持久化完整缓存（下次启动跳过扫描 + 增量 diff）
-                        _save_scan_cache(current_files, sync_version=new_version)
 
                 elif msg_type == "SYNC_SHARD_ACK":
                     pass  # 分片确认
@@ -1665,7 +1515,6 @@ async def ws_session():
                     logger.warning("同步被拒绝: %s，重传全量", reason)
                     _last_sync_version = 0
                     _last_synced_codes = set()
-                    _invalidate_scan_cache()
                     loop = asyncio.get_running_loop()
                     report = await loop.run_in_executor(
                         None, lambda: build_sync_report(incremental=False)
