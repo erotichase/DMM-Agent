@@ -59,6 +59,7 @@ ORGANIZE_ON_CONFLICT = "skip"  # 文件冲突处理策略: skip=跳过保留原�
 # ===== 配置区结束 =====
 
 import asyncio
+import errno
 import hashlib
 import hmac as hmac_mod
 import json
@@ -91,8 +92,8 @@ logger = logging.getLogger("agent")
 
 # 内部常量
 VERSION = "1.0.0"
-_default_lock = os.path.join(os.environ.get("TEMP", "/tmp"), "dmm-agent.lock")
-LOCK_FILE = Path(os.environ.get("DMM_AGENT_LOCK", _default_lock))  # 单实例锁文件路径
+_default_lock = os.path.join(os.environ.get("TEMP", "/tmp"), "dmmagent.lock")
+LOCK_FILE = Path(os.environ.get("DMMAGENT_LOCK", _default_lock))  # 单实例锁文件路径
 RECONNECT_BASE = 5  # 重连基础延迟（秒）
 RECONNECT_MAX = 60  # 重连最大延迟（秒）
 RECONNECT_JITTER = 5  # 重连抖动范围（秒）
@@ -241,7 +242,7 @@ def extract_cd_number(stem: str) -> int:
 # 目录哨兵文件
 # ═══════════════════════════════════════════════════════════════
 
-SENTINEL_NAME = ".dmm-agent-marker"
+SENTINEL_NAME = ".dmmagent-marker"
 
 
 def ensure_sentinel(base_dir: str) -> str:
@@ -913,8 +914,70 @@ def _cleanup_empty_dirs(moves: list[dict]) -> int:
     return cleaned
 
 
+_RENAME_RETRY_DELAYS = (1.0, 2.0)
+_WINDOWS_RETRYABLE_ERRORS = {5, 32, 33}  # access denied, sharing/lock violation
+
+
+def _same_filesystem(src: Path, dest_parent: Path) -> bool | None:
+    """Return whether two paths are on one filesystem, or None if unknown."""
+    try:
+        # splitdrive also handles UNC shares and is more reliable than st_dev on
+        # some Windows/Python combinations.
+        if os.name == "nt":
+            src_drive = os.path.splitdrive(os.path.abspath(src))[0].casefold()
+            dest_drive = os.path.splitdrive(os.path.abspath(dest_parent))[0].casefold()
+            if src_drive or dest_drive:
+                return src_drive == dest_drive
+        return src.stat().st_dev == dest_parent.stat().st_dev
+    except OSError:
+        return None
+
+
+def _is_retryable_rename_error(exc: OSError) -> bool:
+    """Recognize transient file locks across Windows, macOS, and Linux."""
+    return (
+        exc.errno in {errno.EACCES, errno.EPERM, errno.EBUSY}
+        or getattr(exc, "winerror", None) in _WINDOWS_RETRYABLE_ERRORS
+    )
+
+
+def _rename_with_retry(src: Path, dest: Path) -> None:
+    """Rename a file, retrying short-lived permission and sharing failures."""
+    for attempt in range(len(_RENAME_RETRY_DELAYS) + 1):
+        try:
+            src.rename(dest)
+            return
+        except OSError as exc:
+            if attempt >= len(_RENAME_RETRY_DELAYS) or not _is_retryable_rename_error(exc):
+                raise
+            delay = _RENAME_RETRY_DELAYS[attempt]
+            logger.warning(
+                "文件暂时被占用或拒绝访问，%.0f 秒后重试 (%d/%d): %s",
+                delay, attempt + 1, len(_RENAME_RETRY_DELAYS), src,
+            )
+            time.sleep(delay)
+
+
+def _move_error_hint(exc: OSError, src: Path, dest: Path) -> str:
+    """Build an actionable, platform-neutral explanation for rename errors."""
+    same_filesystem = _same_filesystem(src, dest.parent)
+    winerror = getattr(exc, "winerror", None)
+    if exc.errno == errno.EXDEV or winerror == 17 or same_filesystem is False:
+        return "源目录与目标目录不在同一文件系统；本 Agent 禁止跨卷复制移动"
+    if exc.errno == errno.EROFS:
+        return "源卷或目标卷为只读挂载"
+    if exc.errno == errno.ENOSPC:
+        return "目标卷空间不足"
+    if _is_retryable_rename_error(exc):
+        return (
+            "权限不足或文件被占用/锁定；请检查源目录的修改/删除权限、"
+            "目标目录的写入权限、文件锁定状态及系统文件访问授权"
+        )
+    return "系统拒绝重命名；请检查卷的挂载方式、权限和文件系统限制"
+
+
 def _execute_move(task_id: int, params: dict, report_progress: Callable[[int, str], None] | None = None, target_base: str | None = None) -> dict:
-    """执行移动任务（同盘 rename，BASE_DIR 与 TARGET_DIR 必须在同一磁盘）"""
+    """执行移动任务（同一文件系统内 rename，不进行跨文件系统复制）。"""
     code = params.get("code", "")
     target_dir = params.get("target_dir", "")
     on_conflict = params.get("on_conflict", "skip")
@@ -1007,7 +1070,7 @@ def _execute_move(task_id: int, params: dict, report_progress: Callable[[int, st
                 logger.debug("原地重命名失败 %s → %s: %s（将带原名移动）", src.name, dest.name, e)
 
         try:
-            src.rename(dest)
+            _rename_with_retry(src, dest)
         except OSError as e:
             # 回滚原地重命名，恢复原始文件名
             if src != original_src and src.exists():
@@ -1015,7 +1078,7 @@ def _execute_move(task_id: int, params: dict, report_progress: Callable[[int, st
                     src.rename(original_src)
                 except OSError:
                     logger.warning("回滚重命名失败: %s → %s", src, original_src)
-            logger.error("移动失败 %s → %s: %s（BASE_DIR 与 TARGET_DIR 必须在同一磁盘）", src, dest, e)
+            logger.error("移动失败 %s → %s: %s（%s）", src, dest, e, _move_error_hint(e, src, dest))
             raise
         moved += 1
         if report_progress and total > 0:
@@ -1052,7 +1115,7 @@ def _execute_scan(task_id: int, params: dict) -> dict:
 def _execute_organize(task_id: int, params: dict) -> dict:
     """执行整理任务：使用 Cloud 下发的元数据整理文件到标准目录结构
 
-    文件从 BASE_DIRS[i] 移动到 TARGET_DIRS[i]（一一对应，必须同盘），rename 零 IO。
+    文件从 BASE_DIRS[i] 移动到 TARGET_DIRS[i]（一一对应，必须同一文件系统），rename 零 IO。
     """
     metadata = params.get("metadata", {})
     if not metadata:

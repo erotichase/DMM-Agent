@@ -49,7 +49,7 @@ if ($Token -and $Token.Length -ge 8) {
 
 # ─── Kill existing agent ───
 
-$LockFile = Join-Path $env:TEMP "dmm-agent.lock"
+$LockFile = Join-Path $env:TEMP "dmmagent.lock"
 if (Test-Path $LockFile) {
     $OldPid = (Get-Content $LockFile -ErrorAction SilentlyContinue).Trim()
     if ($OldPid) {

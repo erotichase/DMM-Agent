@@ -57,7 +57,7 @@ if [ ! -d "$VENV" ]; then
 fi
 
 # Kill existing agent if running (PID recorded in lock file)
-LOCK_FILE="${DMM_AGENT_LOCK:-/tmp/dmm-agent.lock}"
+LOCK_FILE="${DMMAGENT_LOCK:-/tmp/dmmagent.lock}"
 if [ -f "$LOCK_FILE" ]; then
     OLD_PID=$(cat "$LOCK_FILE" 2>/dev/null | tr -d '[:space:]')
     if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then

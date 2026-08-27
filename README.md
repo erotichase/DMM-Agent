@@ -1,4 +1,4 @@
-# DMM-Agent
+# dmmagent
 
 本地视频管理助手，单文件部署，零外部依赖（仅需 Python 3.10+ 和 websockets）。
 
@@ -129,7 +129,7 @@ F:/JAVTMP/JUR-582.mp4
 F:/JAV/桜空もも/JUR-582/JUR-582.mp4
 ```
 
-- BASE_DIR 与 TARGET_DIR 必须在同一磁盘（仅同盘 rename，禁止跨盘）
+- BASE_DIR 与 TARGET_DIR 必须位于同一文件系统（仅原子 `rename`，禁止跨文件系统复制移动）
 - 传输过程中创建 `.dmm-tmp` 临时文件
 - 文件被锁（杀毒扫描等）时自动重试 3 次（指数退避 1s→2s）
 - 单文件失败不中断整体任务，最终报告成功/跳过/失败计数
@@ -189,13 +189,13 @@ F:/JAV/桜空もも/JUR-582/JUR-582.mp4
 ### 多个 Agent 冲突
 
 ```
-[ERROR] Agent 已在运行中（锁文件 /tmp/dmm-agent.lock）
+[ERROR] Agent 已在运行中（锁文件 /tmp/dmmagent.lock）
 ```
 
 同一台机器只能运行一个实例。如需多个：
 
 ```bash
-export DMM_AGENT_LOCK=/tmp/dmm-agent-2.lock
+export DMMAGENT_LOCK=/tmp/dmmagent-2.lock
 python3 agent.py
 ```
 
@@ -206,7 +206,7 @@ python3 agent.py
 nohup python3 agent.py > agent.log 2>&1 &
 
 # systemd
-sudo systemctl enable dmm-agent && sudo systemctl start dmm-agent
+sudo systemctl enable dmmagent && sudo systemctl start dmmagent
 
 # Windows — 使用 run.ps1 或创建计划任务
 ```
